@@ -1,0 +1,59 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# --- Virtual Environment ---
+venv/
+ENV/
+env/
+.venv/
+
+# --- IDE & OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Data & Outputs (OCR Results) ---
+# Ignore large data files and outputs
+*.log
+models/
+Project-Notes/
+reports/
+
+# --- Machine Learning (YOLO) ---
+# Keep the .py code, but ignore the heavy binary weights
+*.pt
+*.pth
+*.weights
+*.onnx
+checkpoints/
+runs/
+weights/
+
+# --- Secrets ---
+.env
+
+# --- Custom Cleanup Rules ---
+
+# Ignore backup files
+*.backup
+*.bak
+*.old
+
+# Ignore files/folders with 'copy' in the name
+# (Be careful: this ignores 'copyright' too!)
+*copy*
+
+# Ignore folders with 'superseded' in the name
+**/*superseded*/
+
+# Optional: Ignore common temporary editor files
+*~
+*.tmp

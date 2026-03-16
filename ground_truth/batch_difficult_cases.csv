@@ -1,0 +1,28 @@
+scan_id,job_number,notes
+scan326,250209-01,Difficult case - verification target
+scan358,1108490,Unusual format (no suffix dash)
+scan360,240283-16,Year 2024 batch
+scan366,240275-02,Year 2024 batch
+scan367,240275-02,Year 2024 batch (duplicate job)
+scan380,230531-13,Year 2023 batch (older)
+scan382,230531-13,Year 2023 batch (duplicate job)
+scan383,230531-13,Year 2023 batch (duplicate job)
+scan395,240291-09,Year 2024 batch
+scan410,240517-06,Year 2024 batch
+scan411,240517-06,Year 2024 batch (duplicate job)
+scan412,240517-06,Year 2024 batch (duplicate job)
+scan413,250306-04,Year 2025 batch
+scan414,250306-04,Year 2025 batch (duplicate job)
+scan415,250306-04,Year 2025 batch (duplicate job)
+scan416,240384-03,Year 2024 batch
+scan417,240384-03,Year 2024 batch (duplicate job)
+scan418,240384-03,Year 2024 batch (duplicate job)
+scan419,240384-03,Year 2024 batch (duplicate job)
+scan420,240384-03,Year 2024 batch (duplicate job)
+scan979,250341-01,High scan number range
+scan981,250341-02,High scan number range (sequential suffix)
+scan983,250286-03,High scan number range
+scan989,250284-04,High scan number range
+scan990,250287-06,High scan number range
+scan991,250287-06,High scan number range (duplicate job)
+scan997,240292-22,High scan number + Year 2024
