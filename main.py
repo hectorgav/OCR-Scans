@@ -1,39 +1,40 @@
 # =============================================================================
-# OCR BATCH PIPELINE - Main Orchestrator
+# OCR BATCH PIPELINE - Main Orchestrator (JSON-First Architecture)
 # =============================================================================
 # 
 # Usage Examples:
 #   python main.py                              # Auto-generated batch ID
-#   python main.py --batch-id batch_001         # Custom batch ID
+#   python main.py --batch-id Run_A             # Custom batch ID
 #   python main.py --input-dir ./scans/         # Override input directory
-#   python main.py --no-archive                 # Disable archiving
+#   python main.py --auto-verify batch_001      # Run OCR and instantly verify!
 #
-# Report Structure:
-#   reports/
-#   ├── latest/                                 → Symlink to most recent batch
-#   │   ├── statistics_report.txt
-#   │   └── smart_filing_summary.json
-#   └── archive/
-#       └── 2026-03-16_14-30-00_batch_001/      → Archived batch reports
+# Data Flow:
+#   1. Runs OCR on inputs.
+#   2. Exports raw data to: 00-output/reports/latest_run_data.json
+#   3. (Optional) Triggers verify.py to build dashboard metrics.
 #
 # =============================================================================
 
 import time
 import os
+import sys  # <-- CRITICAL FIX: Ensures we use the active python environment
 import logging
 import argparse
-import shutil
+import subprocess
 from datetime import datetime
+from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Dict, Any, List, Optional, Set
+
+from tqdm import tqdm
+import cv2
 
 # =============================================================================
 # STABILITY FIXES: Environment Configuration
 # =============================================================================
-# Clear any rogue handlers from libraries like paddle/torch that call basicConfig
 logging.getLogger().handlers = []
 
-# Force DLL search path for Torch before any heavy imports (Windows compatibility)
 try:
-    import sys
     venv_base = os.environ.get("VIRTUAL_ENV") or os.getcwd()
     torch_lib = os.path.join(venv_base, "Lib", "site-packages", "torch", "lib")
     if os.path.exists(torch_lib):
@@ -47,56 +48,43 @@ except Exception:
     pass
 
 # =============================================================================
-# CONFIG IMPORTS (Sets environment stability flags first)
+# CONFIG & PIPELINE IMPORTS
 # =============================================================================
 from config import (
     INPUT_DIR, PREPROCESSED_DIR, REPORTS_DIR, MAX_WORKERS,
     SUPPORTED_EXTENSIONS
 )
 
-from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from typing import Dict, Any, List, Optional, Set
-from tqdm import tqdm
-import cv2
-import numpy as np
-
-# =============================================================================
-# PIPELINE IMPORTS
-# =============================================================================
 from src.pipeline.extractor import extract_job_number
 from src.pipeline.smart_filing import smart_correct_batch, Record, FAILED_JOB_MARKERS
-
-# =============================================================================
-# UTILS IMPORTS
-# =============================================================================
 from src.utils.pdf_utils import pdf_to_images
-from src.utils.fs import (
-    setup_directory_structure,
-    get_report_path,
-    route_to_success,
-    route_to_failed,
-)
-from src.utils.log import (
-    get_logger,
-    log_pipeline_start,
-    log_error,
-    log_banner,
-)
-from src.utils.statistics import generate_and_save_statistics, WallClockTracker
+from src.utils.fs import setup_directory_structure, route_to_success, route_to_failed
+from src.utils.log import get_logger, log_pipeline_start, log_error, log_banner
+
+from src.utils.statistics import generate_pipeline_run_data, WallClockTracker
 
 logger = get_logger("main_orchestrator")
 
+
 # =============================================================================
-# HELPER: User Prompt for Known Jobs
+# SESSION CONTEXT MANAGER
 # =============================================================================
+class BatchSession:
+    def __init__(self, cli_args: argparse.Namespace):
+        if cli_args.batch_id:
+            self.batch_id = cli_args.batch_id
+        else:
+            self.batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+        self.input_dir = Path(cli_args.input_dir) if cli_args.input_dir else INPUT_DIR
+        
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        self.raw_data_json = REPORTS_DIR / "latest_run_data.json"
+        
+        self.auto_verify_batch = cli_args.auto_verify
+
+
 def get_known_jobs_from_user() -> Optional[Set[str]]:
-    """
-    Prompt user for known-valid job numbers to restrict smart corrections.
-    
-    Returns:
-        Set of known job numbers, or None if user skips validation
-    """
     print("\n" + "=" * 50)
     print("OPTIONAL: POST-OCR VALIDATION")
     print("Enter 'known good' job numbers to restrict smart corrections.")
@@ -105,7 +93,6 @@ def get_known_jobs_from_user() -> Optional[Set[str]]:
     print("=" * 50)
 
     user_input = input("Known Jobs > ")
-
     if not user_input.strip():
         logger.info("No known jobs provided. Smart filing will use best-guess consensus logic.")
         return None
@@ -115,42 +102,19 @@ def get_known_jobs_from_user() -> Optional[Set[str]]:
     return jobs
 
 
-# =============================================================================
-# STAGE 1: FILE DISCOVERY & CONVERSION
-# =============================================================================
 def find_input_files(directory: Path) -> List[Path]:
-    """
-    Discover all valid input files in the specified directory.
-    
-    Args:
-        directory: Path to search for input files
-        
-    Returns:
-        Sorted list of valid file paths
-    """
     if not directory.exists():
         logger.error(f"Input directory not found: {directory}")
         return []
-    
     valid_exts = {ext.replace("*", "").lower() for ext in SUPPORTED_EXTENSIONS}
     return sorted([f for f in directory.iterdir() if f.is_file() and f.suffix.lower() in valid_exts])
 
 
-def run_conversion_stage(input_dir: Path, output_dir: Path) -> int:
-    """
-    Convert input files (PDF/images) to standardized JPG format for OCR.
-    
-    Args:
-        input_dir: Directory containing source files
-        output_dir: Directory to save converted images
-        
-    Returns:
-        Count of successfully converted files
-    """
+def run_conversion_stage(session: BatchSession, output_dir: Path) -> int:
     logger_conversion = get_logger("conversion_stage")
     log_banner(logger_conversion, "STARTING STAGE 1: FILE CONVERSION (PDF -> IMG)")
 
-    input_files = find_input_files(input_dir)
+    input_files = find_input_files(session.input_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     success_count = 0
@@ -173,20 +137,7 @@ def run_conversion_stage(input_dir: Path, output_dir: Path) -> int:
     return success_count
 
 
-# =============================================================================
-# STAGE 2: EXTRACTION
-# =============================================================================
 def process_single_file(image_path: str, original_file_path: str) -> Dict[str, Any]:
-    """
-    Process a single image file through the OCR extraction pipeline.
-    
-    Args:
-        image_path: Path to pre-processed image
-        original_file_path: Path to original source file
-        
-    Returns:
-        Dictionary containing extraction results and metadata
-    """
     start_time = time.monotonic()
     try:
         job_number, confidence, method, details = extract_job_number(
@@ -233,26 +184,11 @@ def process_single_file(image_path: str, original_file_path: str) -> Dict[str, A
         }
 
 
-def run_extraction_batch(
-    oriented_dir: Path, 
-    original_dir: Path, 
-    max_workers: int
-) -> List[Dict[str, Any]]:
-    """
-    Run OCR extraction on all pre-processed images in batch mode.
-    
-    Args:
-        oriented_dir: Directory containing pre-processed images
-        original_dir: Directory containing original source files
-        max_workers: Maximum number of parallel workers
-        
-    Returns:
-        List of extraction result dictionaries
-    """
+def run_extraction_batch(session: BatchSession, oriented_dir: Path, max_workers: int) -> List[Dict[str, Any]]:
     logger_extraction = get_logger("extraction_stage")
     log_banner(logger_extraction, "STARTING STAGE 2: JOB NUMBER EXTRACTION")
 
-    original_files = {p.stem: p for p in find_input_files(original_dir)}
+    original_files = {p.stem: p for p in find_input_files(session.input_dir)}
     ready_images = sorted(list(oriented_dir.glob("*_ready.jpg")))
 
     if not ready_images:
@@ -295,27 +231,12 @@ def run_extraction_batch(
     return results
 
 
-# =============================================================================
-# STAGE 3: SMART FILING & ROUTING
-# =============================================================================
 def run_smart_filing_and_routing(
+    session: BatchSession,
     results: List[Dict[str, Any]], 
     known_jobs: Optional[Set[str]],
-    elapsed_time: Optional[float] = None,
-    batch_id: Optional[str] = None,
-    report_dir: Optional[Path] = None,
+    elapsed_time: Optional[float] = None
 ):
-    """
-    Apply smart filing corrections and route files to success/failed folders.
-    Also generates statistics reports with optional archiving.
-    
-    Args:
-        results: List of extraction result dictionaries
-        known_jobs: Optional set of known-valid job numbers for validation
-        elapsed_time: Total wall-clock time for the pipeline
-        batch_id: Unique batch identifier for archiving
-        report_dir: Directory path for report storage (if archiving enabled)
-    """
     logger_final = get_logger("final_stage")
     log_banner(logger_final, "STARTING STAGE 3: SMART FILING CONSENSUS")
 
@@ -362,150 +283,84 @@ def run_smart_filing_and_routing(
         else:
             route_to_failed(original_path, error=str(res.get("error", "unknown")))
 
-    # =========================================================
-    # REPORT GENERATION: Use archive directory if provided
-    # =========================================================
-    if report_dir and batch_id:
-        stats_report_path = report_dir / "statistics_report.txt"
-        logger_final.info(f"📁 Reports will be archived to: {report_dir}")
-    else:
-        stats_report_path = get_report_path("statistics_report.txt")
-
-    generate_and_save_statistics(
-        results, 
-        stats_report_path, 
-        elapsed_time=elapsed_time,
-        batch_id=batch_id,
+    formatted_report = generate_pipeline_run_data(
+        results=results, 
+        output_json_path=session.raw_data_json,
+        batch_id=session.batch_id,
+        elapsed_time=elapsed_time
     )
 
-    try:
-        if stats_report_path.exists():
-            print("\n" + "=" * 80)
-            with open(stats_report_path, "r", encoding="utf-8") as f:
-                print(f.read())
-            print("=" * 80 + "\n")
-    except Exception as e:
-        logger_final.error(f"Failed to print statistics to console: {e}")
+    print("\n" + "=" * 80)
+    print(formatted_report)
+    print("=" * 80 + "\n")
 
     log_banner(logger_final, "PIPELINE COMPLETED")
-
-
-# =============================================================================
-# ARCHIVE MANAGEMENT: Report Directory Setup
-# =============================================================================
-def setup_report_directory(batch_id: str) -> Path:
-    """
-    Create timestamped report directory with 'latest' symlink.
-    
-    Args:
-        batch_id: Unique identifier for this batch (e.g., "batch_001" or timestamp)
-        
-    Returns:
-        Path to the archive directory for this batch
-    """
-    archive_dir = REPORTS_DIR / "archive" / batch_id
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    
-    latest_dir = REPORTS_DIR / "latest"
-    
-    # Clean up existing 'latest' symlink or directory
-    if latest_dir.exists() or latest_dir.is_symlink():
-        try:
-            if latest_dir.is_symlink():
-                latest_dir.unlink()
-            else:
-                shutil.rmtree(latest_dir)
-        except OSError as e:
-            logger.warning(f"Failed to remove existing 'latest' directory: {e}")
-    
-    # Create new symlink (Unix/Mac) or copy (Windows)
-    try:
-        latest_dir.symlink_to(archive_dir)
-    except OSError:
-        # Windows fallback: copy instead of symlink
-        try:
-            if latest_dir.exists():
-                shutil.rmtree(latest_dir)
-            shutil.copytree(archive_dir, latest_dir)
-        except OSError as e:
-            logger.warning(f"Failed to create 'latest' reference: {e}")
-    
-    return archive_dir
 
 
 # =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
 if __name__ == "__main__":
-    # =========================================================
-    # CLI ARGUMENT PARSING
-    # =========================================================
     parser = argparse.ArgumentParser(description="OCR Batch Pipeline")
     parser.add_argument(
-        "--batch-id",
-        type=str,
-        default=None,
-        help="Batch identifier for archiving (e.g., 'batch_001'). Auto-generated if not provided."
+        "--batch-id", type=str, default=None,
+        help="Batch identifier for archiving. Auto-generated if not provided."
     )
+    parser.add_argument("--input-dir", type=str, default=None, help="Override input directory")
     parser.add_argument(
-        "--input-dir",
-        type=str,
-        default=None,
-        help="Override input directory"
+        "--auto-verify", type=str, default=None, 
+        help="Immediately run verify.py after execution using this ground truth CSV"
     )
-    parser.add_argument(
-        "--no-archive",
-        action="store_true",
-        help="Disable archiving (save to reports/ only)"
-    )
+    
     args = parser.parse_args()
     
     setup_directory_structure()
+    session = BatchSession(args)
     main_logger = get_logger("main_orchestrator")
+    
+    main_logger.info(f"📁 Batch ID: {session.batch_id}")
+    main_logger.info(f"📁 Raw Data Export: {session.raw_data_json}")
+
     known_jobs_list = get_known_jobs_from_user()
 
-    # =========================================================
-    # BATCH IDENTIFICATION: Use CLI argument or auto-generate timestamp
-    # Format: YYYY-MM-DD_HH-MM-SS or custom (e.g., "batch_001")
-    # =========================================================
-    if args.batch_id:
-        batch_id = args.batch_id
-    else:
-        batch_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    
-    # =========================================================
-    # ARCHIVE SETUP: Create directory structure (unless --no-archive)
-    # =========================================================
-    if not args.no_archive:
-        report_dir = setup_report_directory(batch_id)
-        main_logger.info(f"📁 Batch ID: {batch_id}")
-        main_logger.info(f"📁 Reports archived to: {report_dir}")
-    else:
-        report_dir = None
-        batch_id = None
-        main_logger.info("⚠️  Archiving disabled (--no-archive)")
-    
-    # Override input directory if provided
-    input_dir = Path(args.input_dir) if args.input_dir else INPUT_DIR
-
-    ready_files_count = run_conversion_stage(input_dir=input_dir, output_dir=PREPROCESSED_DIR)
+    ready_files_count = run_conversion_stage(session=session, output_dir=PREPROCESSED_DIR)
 
     if ready_files_count > 0:
         with WallClockTracker() as tracker:
             extraction_results = run_extraction_batch(
+                session=session,
                 oriented_dir=PREPROCESSED_DIR,
-                original_dir=input_dir,
                 max_workers=MAX_WORKERS,
             )
             
         if extraction_results:
             run_smart_filing_and_routing(
+                session=session,
                 results=extraction_results,
                 known_jobs=known_jobs_list,
-                elapsed_time=tracker.elapsed,
-                batch_id=batch_id,
-                report_dir=report_dir,
+                elapsed_time=tracker.elapsed
             )
+            
+            # =========================================================
+            # STAGE 5: AUTO-VERIFICATION (Bulletproofed)
+            # =========================================================
+            if session.auto_verify_batch:
+                main_logger.info(f"🔄 Triggering Auto-Verification against: {session.auto_verify_batch}.csv")
+                
+                # Resolves the absolute path to verify.py so subprocess never gets lost
+                verify_script_path = Path(__file__).resolve().parent / "verify.py"
+                
+                try:
+                    # Uses sys.executable to ensure we use your active Python venv
+                    subprocess.run(
+                        [sys.executable, str(verify_script_path), "--batch", session.auto_verify_batch], 
+                        check=True
+                    )
+                except subprocess.CalledProcessError as e:
+                    main_logger.error(f"❌ Auto-verification script failed with error code: {e.returncode}")
+                except Exception as e:
+                    main_logger.error(f"❌ Failed to launch verify.py: {e}")
+                    
         else:
             main_logger.warning("No extraction results generated.")
     else:

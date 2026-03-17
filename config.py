@@ -28,7 +28,7 @@ PROJECT_ROOT = BASE_DIR
 
 ENV_PATHS = {
     "OFFICE": {
-        "INPUT": Path("G:/Scans/preprocess/00-input/03-batch"),
+        "INPUT": Path("G:/Scans/preprocess/00-input/0-test"),
         "OUTPUT": Path("G:/Scans/preprocess/00-output"),
     },
     "HOME": {
@@ -37,7 +37,7 @@ ENV_PATHS = {
     },
 }
 
-WORK_ENV = os.getenv("WORK_ENV", "HOME")
+WORK_ENV = os.getenv("WORK_ENV", "OFFICE")
 if WORK_ENV not in ENV_PATHS:
     raise ValueError(f"Unknown WORK_ENV: '{WORK_ENV}'. Available: {list(ENV_PATHS.keys())}")
 
@@ -46,6 +46,9 @@ OUTPUT_DIR = ENV_PATHS[WORK_ENV]["OUTPUT"]
 REPORTS_DIR = OUTPUT_DIR / "reports"
 LOG_DIR = OUTPUT_DIR / "logs"
 DEBUG_BASE_DIR = OUTPUT_DIR / "debug"
+
+# JSON-First Architecture: Dashboard Data Lake
+DASHBOARD_DIR = OUTPUT_DIR / "dashboard_data"
 
 # Debug Sub-directories (Consolidated for I/O efficiency)
 DEBUG_FOLDERS = {
@@ -58,7 +61,8 @@ DEBUG_FOLDERS = {
 # This prevents an external directory from being created, while preventing ImportErrors in other scripts.
 PREPROCESSED_DIR = DEBUG_FOLDERS["preprocessed"] 
 
-_ALL_DIRS = [OUTPUT_DIR, REPORTS_DIR, LOG_DIR, DEBUG_BASE_DIR] + list(DEBUG_FOLDERS.values())
+# Auto-create all required directories (including the new dashboard lake)
+_ALL_DIRS = [OUTPUT_DIR, REPORTS_DIR, DASHBOARD_DIR, LOG_DIR, DEBUG_BASE_DIR] + list(DEBUG_FOLDERS.values())
 for directory in _ALL_DIRS: 
     directory.mkdir(parents=True, exist_ok=True)
 
