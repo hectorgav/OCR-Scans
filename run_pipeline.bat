@@ -8,7 +8,7 @@ echo ==================================================
 echo.
 
 :: --- CONFIGURATION ---
-set INPUT_DIRECTORY=G:\Scans\preprocess\00-input\02-batch
+set INPUT_DIRECTORY=G:\Scans\preprocess\00-input\03-batch
 set GROUND_TRUTH_BATCH=batch_001_002_03
 
 :: Auto-generate a timestamp for the Batch ID (Format: YYYYMMDD_HHMMSS)
