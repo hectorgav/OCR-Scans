@@ -20,16 +20,20 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["KMP_BLOCKTIME"] = "0"
 
 # ============================================================================
+# --- EXECUTION MODE (DEV vs PROD) ---
+# ============================================================================
+APP_MODE = os.getenv("APP_MODE", "DEVELOPMENT").upper()
+
+# ============================================================================
 # --- CORE APPLICATION PATHS ---
 # ============================================================================
-
 BASE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BASE_DIR
+PROJECT_ROOT = BASE_DIR  # FIXED: Restored missing variable
 
 ENV_PATHS = {
     "OFFICE": {
         "INPUT": Path("G:/Scans/preprocess/00-input/0-test"),
-        "OUTPUT": Path("G:/Scans/preprocess/00-output"),
+        "OUTPUT": Path("G:/Scans/preprocess/"),
     },
     "HOME": {
         "INPUT": Path("C:/Users/Kimera/Downloads/OCR/02-Scans/preprocess/00-input/02-batch"),
@@ -39,39 +43,56 @@ ENV_PATHS = {
 
 WORK_ENV = os.getenv("WORK_ENV", "OFFICE")
 if WORK_ENV not in ENV_PATHS:
-    raise ValueError(f"Unknown WORK_ENV: '{WORK_ENV}'. Available: {list(ENV_PATHS.keys())}")
+    raise ValueError(f"Unknown WORK_ENV: '{WORK_ENV}'.")
 
+RAW_OUTPUT_ROOT = ENV_PATHS[WORK_ENV]["OUTPUT"]
+
+# Define Mode-Specific variables ONCE here
+if APP_MODE == "DEVELOPMENT":
+    OUTPUT_DIR = RAW_OUTPUT_ROOT / "00-output-dev"
+    VERBOSE_OUTPUT = True
+    ENABLE_DEBUG_VIZ = True
+    LOG_LEVEL = "DEBUG"
+    YOLO_CONF_DETECTION = 0.12
+    TRUST_OCR_THRESHOLD = 1.10  # High threshold for testing
+else:
+    OUTPUT_DIR = RAW_OUTPUT_ROOT / "00-output"
+    VERBOSE_OUTPUT = False
+    ENABLE_DEBUG_VIZ = False
+    LOG_LEVEL = "INFO"
+    YOLO_CONF_DETECTION = 0.25  # Tighter for production
+    TRUST_OCR_THRESHOLD = 0.85  # Real-world threshold
+
+# Derived Paths
 INPUT_DIR = ENV_PATHS[WORK_ENV]["INPUT"]
-OUTPUT_DIR = ENV_PATHS[WORK_ENV]["OUTPUT"]
 REPORTS_DIR = OUTPUT_DIR / "reports"
 LOG_DIR = OUTPUT_DIR / "logs"
+DASHBOARD_DIR = OUTPUT_DIR / "dashboard_data"
+HOLDING_ZONE_DIR = OUTPUT_DIR / "holding_zone"
 DEBUG_BASE_DIR = OUTPUT_DIR / "debug"
 
-# JSON-First Architecture: Dashboard Data Lake
-DASHBOARD_DIR = OUTPUT_DIR / "dashboard_data"
-
-# Debug Sub-directories (Consolidated for I/O efficiency)
 DEBUG_FOLDERS = {
     "preprocessed": DEBUG_BASE_DIR / "1_preprocess",
-    "macro_vision": DEBUG_BASE_DIR / "2_macro_vision",  # YOLO, Page regions, Title Blocks
-    "micro_vision": DEBUG_BASE_DIR / "3_micro_vision",  # ROI crops, OCR output cards
+    "macro_vision": DEBUG_BASE_DIR / "2_macro_vision",
+    "micro_vision": DEBUG_BASE_DIR / "3_micro_vision",
 }
+PREPROCESSED_DIR = DEBUG_FOLDERS["preprocessed"]
 
-# CRITICAL FIX: Re-pointed PREPROCESSED_DIR directly into the debug sub-folder.
-# This prevents an external directory from being created, while preventing ImportErrors in other scripts.
-PREPROCESSED_DIR = DEBUG_FOLDERS["preprocessed"] 
+# ============================================================================
+# --- DIRECTORY INITIALIZATION ---
+# ============================================================================
+_REQUIRED_DIRS = [OUTPUT_DIR, REPORTS_DIR, DASHBOARD_DIR, LOG_DIR, HOLDING_ZONE_DIR]
+if APP_MODE == "DEVELOPMENT":
+    _REQUIRED_DIRS += [DEBUG_BASE_DIR] + list(DEBUG_FOLDERS.values())
 
-# Auto-create all required directories (including the new dashboard lake)
-_ALL_DIRS = [OUTPUT_DIR, REPORTS_DIR, DASHBOARD_DIR, LOG_DIR, DEBUG_BASE_DIR] + list(DEBUG_FOLDERS.values())
-for directory in _ALL_DIRS: 
+for directory in _REQUIRED_DIRS: 
     directory.mkdir(parents=True, exist_ok=True)
-
 # ============================================================================
 # --- LOGGING & PDF SETTINGS ---
 # ============================================================================
 
-VERBOSE_OUTPUT = True
-LOG_LEVEL = "DEBUG"  
+# VERBOSE_OUTPUT = True
+# LOG_LEVEL = "DEBUG"  
 LOG_FILENAME = LOG_DIR / "scans_job_extraction.log"
 LOG_FILE_MAX_BYTES = 10 * 1024 * 1024  
 LOG_FILE_BACKUP_COUNT = 5
@@ -155,7 +176,7 @@ PADDLE_OCR_CONFIG = {
 
 TEMPLATE_MATCHING_ENABLED = True
 ENABLE_MULTI_ROTATION_OCR = True
-ENABLE_DEBUG_VIZ = True
+# ENABLE_DEBUG_VIZ = True
 
 # Parallel workers for batch processing. 
 # RECOMMENDED: 2-3 for 16GB RAM, 6-8 for 32GB+ RAM (~3GB per worker)
@@ -166,7 +187,3 @@ MAX_WORKERS = 4
 # ============================================================================
 # Files with confidence below this score will be flagged for manual review
 TRUST_OCR_THRESHOLD = 1.10
-
-# Define the "Holding Zone" for unverified production data
-HOLDING_ZONE_DIR = OUTPUT_DIR / "holding_zone"
-HOLDING_ZONE_DIR.mkdir(parents=True, exist_ok=True)
