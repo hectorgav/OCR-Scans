@@ -1,4 +1,6 @@
-# --- Python ---
+# ============================================================================
+# --- PYTHON & BUILD ARTIFACTS ---
+# ============================================================================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -7,45 +9,56 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-
-# --- Virtual Environment ---
+.venv/
 venv/
 ENV/
 env/
-.venv/
 
-# --- IDE & OS ---
+# ============================================================================
+# --- IDE, OS & SECRETS ---
+# ============================================================================
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-
-# --- Data & Outputs (OCR Results) ---
-# Ignore large data files and outputs
-*.log
-models/
-Project-Notes/
-reports/
-
-# --- Machine Learning (YOLO) ---
-# Keep the .py code, but ignore the heavy binary weights
-*.pt
-*.pth
-*.weights
-*.onnx
-checkpoints/
-runs/
-weights/
-
-# --- Secrets ---
 .env
-
-# --- Custom Cleanup Rules ---
-
-# Ignore backup files
 *.backup
 *.bak
 *.old
+
+# ============================================================================
+# --- PROJECT SPECIFIC: DATA & OUTPUTS (CRITICAL) ---
+# ============================================================================
+# Ignore all dynamically generated output (Images, Logs, and Local JSONs)
+00-output/
+
+# Ensure the directories exist for others, but stay empty in Git
+!00-output/.gitkeep
+
+# Ignore temporary text reports if any are still being generated
+reports/
+*.log
+
+# ============================================================================
+# --- PROJECT SPECIFIC: MACHINE LEARNING & MODELS ---
+# ============================================================================
+# Ignore heavy binary weights (Keep your .pt files local)
+models/*.pt
+models/*.pth
+models/*.weights
+models/*.onnx
+runs/
+weights/
+checkpoints/
+
+# ============================================================================
+# --- PROJECT SPECIFIC: LOCAL TESTING ---
+# ============================================================================
+# Ignore your local ground truth files used for dev/testing
+ground_truth/*.csv
+
+# Optional: Ignore specific project notes or scratchpads
+Project-Notes/
 
 # Ignore files/folders with 'copy' in the name
 # (Be careful: this ignores 'copyright' too!)

@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, Any, List, Optional, Set
-
+import shutil
 from tqdm import tqdm
 import cv2
 
@@ -52,7 +52,7 @@ except Exception:
 # =============================================================================
 from config import (
     INPUT_DIR, PREPROCESSED_DIR, REPORTS_DIR, MAX_WORKERS,
-    SUPPORTED_EXTENSIONS
+    SUPPORTED_EXTENSIONS, TRUST_OCR_THRESHOLD, HOLDING_ZONE_DIR
 )
 
 from src.pipeline.extractor import extract_job_number
@@ -275,13 +275,18 @@ def run_smart_filing_and_routing(
     logger_final.info(f"Smart Filing complete. {corrections_count} files corrected.")
 
     log_banner(logger_final, "STARTING STAGE 4: ROUTING & REPORTING")
-    for res in tqdm(results, desc="Routing"):
+    for res in tqdm(results, desc="Production Routing"):
+        confidence = float(res.get("confidence", 0.0))
         original_path = Path(res["original_path"]) 
 
-        if res["status"] == "Success" and res.get("job_number") and res["job_number"] not in FAILED_JOB_MARKERS:
+        if res["status"] == "Success" and confidence >= TRUST_OCR_THRESHOLD:
+        # High Confidence: Route to final Success folder
             route_to_success(original_path, res["job_number"])
         else:
-            route_to_failed(original_path, error=str(res.get("error", "unknown")))
+            # Low Confidence or Failure: Route to Holding Zone for Dashboard Review
+            dest = HOLDING_ZONE_DIR / original_path.name
+            shutil.copy2(original_path, dest)
+            logger.warning(f"🚩 Low confidence ({confidence:.2f}) - Routed to Holding Zone: {original_path.name}")  
 
     formatted_report = generate_pipeline_run_data(
         results=results, 

@@ -160,3 +160,13 @@ ENABLE_DEBUG_VIZ = True
 # Parallel workers for batch processing. 
 # RECOMMENDED: 2-3 for 16GB RAM, 6-8 for 32GB+ RAM (~3GB per worker)
 MAX_WORKERS = 4
+
+# ============================================================================
+# --- PRODUCTION HITL SETTINGS ---
+# ============================================================================
+# Files with confidence below this score will be flagged for manual review
+TRUST_OCR_THRESHOLD = 1.10
+
+# Define the "Holding Zone" for unverified production data
+HOLDING_ZONE_DIR = OUTPUT_DIR / "holding_zone"
+HOLDING_ZONE_DIR.mkdir(parents=True, exist_ok=True)
