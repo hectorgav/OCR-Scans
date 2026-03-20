@@ -75,6 +75,7 @@ def load_historical_data() -> pd.DataFrame:
             
             # Extract raw datetime for sorting purposes
             raw_date = pd.to_datetime(data.get("timestamp"))
+            total_processed = summary.get("total_in_batch", 0)
             
             records.append({
                 "Batch ID": batch_info.get("batch_id", j_file.stem),
@@ -84,8 +85,10 @@ def load_historical_data() -> pd.DataFrame:
                 "Theoretical Automation (%)": summary.get("theoretical_automation", 0.0) * 100,
                 "Actual OCR Accuracy (%)": summary.get("actual_accuracy", summary.get("accuracy", 0.0)) * 100,
                 "Silent Failure Rate (%)": summary.get("silent_failure_rate", 0.0) * 100,
-                "Total Processed": summary.get("total_in_batch", 0),
+                "Total Processed": total_processed,
                 "Actual Typos Fixed": summary.get("human_corrections", 0),
+                "Theoretical Auto Count": int(round(summary.get("theoretical_automation", 0.0) * total_processed)),
+                "Silent Failures": summary.get("silent_failures", 0),
                 "Last Batch OCR Time (s)": summary.get("total_wall_time_sec", 0.0),
                 "Speed (Sec / Scan)": summary.get("avg_speed_sec", 0.0),
                 "Mean Confidence": conf_stats.get("mean", 0.0) * 100,
@@ -147,38 +150,54 @@ def load_method_stats() -> pd.DataFrame:
     return df
 
 @st.cache_data(ttl=5)
-def get_latest_run_guesses() -> dict:
-    """Loads the metadata from the latest orchestrator run to pre-fill the UI."""
-    latest_file = OUTPUT_DIR / "reports" / "latest_run_data.json"
+def get_all_pending_guesses() -> dict:
+    """Loads metadata from ALL run reports to map holding zone files to their origin batch."""
     guesses = {}
-    if latest_file.exists():
-        try:
-            with open(latest_file, 'r', encoding='utf-8') as f:
-                run_data = json.load(f)
-                for f_data in run_data.get("files", []):
-                    guesses[f_data["filename"]] = f_data
-        except Exception:
-            pass
+    reports_dir = OUTPUT_DIR / "reports"
+    
+    if reports_dir.exists():
+        # Scan all preserved batch reports
+        for report_file in reports_dir.glob("*_run_data.json"):
+            if report_file.name == "latest_run_data.json":
+                continue # Skip the generic one
+                
+            try:
+                with open(report_file, 'r', encoding='utf-8') as f:
+                    run_data = json.load(f)
+                    batch_id = run_data.get("batch_metadata", {}).get("batch_id", "Unknown")
+                    
+                    # Inject the origin batch_id into every file's metadata
+                    for f_data in run_data.get("files", []):
+                        f_data["batch_id"] = batch_id
+                        guesses[f_data["filename"]] = f_data
+            except Exception:
+                pass
     return guesses
 
-def update_batch_metrics_stateless():
+def update_batch_metrics_stateless(batch_id: str):
     """
     Stateless Metric Recalculation: 
     Scans the Holding Zone and Training Data folders to instantly rebuild
-    the metrics for the current batch after every single human interaction.
+    the metrics for a SPECIFIC batch after every single human interaction.
     """
+    if not batch_id or batch_id == "Unknown":
+        return
+        
     try:
-        run_data_path = OUTPUT_DIR / "reports" / "latest_run_data.json"
+        run_data_path = OUTPUT_DIR / "reports" / f"{batch_id}_run_data.json"
+        
+        # Fallback for backwards compatibility with older files
+        if not run_data_path.exists():
+            run_data_path = OUTPUT_DIR / "reports" / "latest_run_data.json"
+
         if not run_data_path.exists():
             return
             
         with open(run_data_path, 'r', encoding='utf-8') as f:
             raw_run = json.load(f)
         
-        batch_id = raw_run.get("batch_metadata", {}).get("batch_id", "Unknown")
-        total_files = raw_run.get("batch_metadata", {}).get("total_files", 0)
-        
         # Pulls the exact hardware processing time isolated from the orchestrator script
+        total_files = raw_run.get("batch_metadata", {}).get("total_files", 0)
         total_wall_time = raw_run.get("batch_metadata", {}).get("total_wall_time_sec", 0.0)
         
         confidences = []
@@ -329,7 +348,8 @@ def main():
         else:
             st.warning(f"**Action Required:** You have {pending_count} files to verify.")
             
-            guesses = get_latest_run_guesses()
+            # Use the new mapping function to track which file belongs to which batch
+            guesses = get_all_pending_guesses()
             
             # Iterate through queue, presenting one distinct commit button per row
             for file_path in pending_files:
@@ -340,6 +360,7 @@ def main():
                 system_guess = str(file_info.get("corrected_job") or file_info.get("raw_job") or "").strip()
                 conf = float(file_info.get("confidence", 0.0))
                 method_used = file_info.get("method", "unknown")
+                origin_batch_id = file_info.get("batch_id", "Unknown")
                 
                 with st.container(border=True):
                     col_img, col_info, col_input, col_btn = st.columns([1.5, 2, 2, 1])
@@ -426,8 +447,8 @@ def main():
                                 st.error(f"Failed to move file: {e}")
                                 continue
                                 
-                            # Rebuild UI and Data Lake instantly
-                            update_batch_metrics_stateless()
+                            # Rebuild UI and Data Lake instantly for the specific batch
+                            update_batch_metrics_stateless(origin_batch_id)
                             st.rerun()
 
     # =========================================================================
@@ -440,26 +461,41 @@ def main():
         else:
             st.markdown("### 🏆 Pipeline Efficiency (All Time)")
             
+            # --- GLOBAL MATH FIX (Avoid "Average of Averages") ---
+            total_processed_all_time = df['Total Processed'].sum()
+            total_typos_all_time = df['Actual Typos Fixed'].sum()
+            total_accurate_all_time = total_processed_all_time - total_typos_all_time
+            
+            global_accuracy = (total_accurate_all_time / total_processed_all_time * 100) if total_processed_all_time > 0 else 0.0
+            
+            total_theo_auto = df['Theoretical Auto Count'].sum()
+            global_theo_auto = (total_theo_auto / total_processed_all_time * 100) if total_processed_all_time > 0 else 0.0
+            
+            total_silent_failures = df['Silent Failures'].sum()
+            global_silent_rate = (total_silent_failures / total_processed_all_time * 100) if total_processed_all_time > 0 else 0.0
+            
             # --- ROW 1: QUALITY & RISK METRICS ---
             kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-            kpi1.metric(f"Theoretical Automation (at {SHADOW_THRESHOLD*100:.0f}%)", f"{df['Theoretical Automation (%)'].mean():.1f}%")
-            kpi2.metric("Actual OCR Accuracy", f"{df['Actual OCR Accuracy (%)'].mean():.1f}%")
+            kpi1.metric(f"Theoretical Automation (at {SHADOW_THRESHOLD*100:.0f}%)", f"{global_theo_auto:.1f}%")
+            kpi2.metric("Actual OCR Accuracy", f"{global_accuracy:.1f}%")
             
-            silent_rate = df['Silent Failure Rate (%)'].mean()
-            kpi3.markdown(f"**🚨 Silent Failure Risk**<br><h2 style='color: #E74C3C; margin:0;'>{silent_rate:.1f}%</h2>", unsafe_allow_html=True)
+            kpi3.markdown(f"**🚨 Silent Failure Risk**<br><h2 style='color: #E74C3C; margin:0;'>{global_silent_rate:.1f}%</h2>", unsafe_allow_html=True)
             kpi4.metric("Avg System Confidence", f"{df['Mean Confidence'].mean():.1f}%")
             
             st.markdown("<br>", unsafe_allow_html=True)
             
             # --- ROW 2: VOLUME & HARDWARE SPEED METRICS ---
             v_kpi1, v_kpi2, v_kpi3, v_kpi4 = st.columns(4)
-            v_kpi1.metric("Total Scans Processed", f"{df['Total Processed'].sum():,}")
-            v_kpi2.metric("Total Typos Fixed", f"{df['Actual Typos Fixed'].sum():,}")
+            v_kpi1.metric("Total Scans Processed", f"{total_processed_all_time:,}")
+            v_kpi2.metric("Total Typos Fixed", f"{total_typos_all_time:,}")
             
-            # Isolated Machine Speed Data
-            last_run_time = df['Last Batch OCR Time (s)'].iloc[-1]
+            # Isolated Machine Speed Data (Filtering out legacy 0.0s runs)
+            df_valid_speed = df[df['Last Batch OCR Time (s)'] > 0]
+            last_run_time = df_valid_speed['Last Batch OCR Time (s)'].iloc[-1] if not df_valid_speed.empty else 0.0
+            global_avg_speed = df_valid_speed['Speed (Sec / Scan)'].mean() if not df_valid_speed.empty else 0.0
+            
             v_kpi3.metric("Last Batch OCR Time", f"{last_run_time:.1f}s", help="Total processing time for the Python Orchestrator script.")
-            v_kpi4.metric("Avg Speed (Sec / Scan)", f"{df['Speed (Sec / Scan)'].mean():.1f}s")
+            v_kpi4.metric("Avg Speed (Sec / Scan)", f"{global_avg_speed:.1f}s")
             
             st.divider()
             
@@ -497,7 +533,13 @@ def main():
             with col_diag1:
                 st.markdown("#### ⚠️ Typo Severity Analysis")
                 st.info("Measures how drastically the human had to alter the system's guess.")
-                avg_sim = df['Avg Typo Similarity (%)'].mean()
+                
+                # Fix Typo Severity Math (Only count batches where typos actually occurred)
+                df_with_typos = df[df['Actual Typos Fixed'] > 0]
+                if not df_with_typos.empty:
+                    avg_sim = (df_with_typos['Avg Typo Similarity (%)'] * df_with_typos['Actual Typos Fixed']).sum() / df_with_typos['Actual Typos Fixed'].sum()
+                else:
+                    avg_sim = 100.0  # Perfect system
                 
                 # Dynamic coloring based on Levenshtein distance thresholds
                 sim_color = "#27AE60" if avg_sim > 85 else "#F39C12" if avg_sim > 60 else "#E74C3C"

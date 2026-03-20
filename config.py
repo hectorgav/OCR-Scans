@@ -1,6 +1,8 @@
 import os
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 
 # ============================================================================
 # --- ENVIRONMENT STABILITY OVERRIDES ---
@@ -37,7 +39,7 @@ ENV_PATHS = {
     },
     "HOME": {
         "INPUT": Path("C:/Users/Kimera/Downloads/OCR/02-Scans/preprocess/00-input/02-batch"),
-        "OUTPUT": Path("C:/Users/Kimera/Downloads/OCR/02-Scans/preprocess/00-output"),
+        "OUTPUT": Path("C:/Users/Kimera/Downloads/OCR/02-Scans/preprocess/"),
     },
 }
 
@@ -47,21 +49,26 @@ if WORK_ENV not in ENV_PATHS:
 
 RAW_OUTPUT_ROOT = ENV_PATHS[WORK_ENV]["OUTPUT"]
 
-# Define Mode-Specific variables ONCE here
+# --- SMART PATH REDIRECTION ---
 if APP_MODE == "DEVELOPMENT":
+    # Redirect to dev output folder
     OUTPUT_DIR = RAW_OUTPUT_ROOT / "00-output-dev"
-    VERBOSE_OUTPUT = True
-    ENABLE_DEBUG_VIZ = True
     LOG_LEVEL = "DEBUG"
-    YOLO_CONF_DETECTION = 0.12
-    TRUST_OCR_THRESHOLD = 1.10  # High threshold for testing
+    VERBOSE_OUTPUT = True
 else:
+    # Use production output folder
     OUTPUT_DIR = RAW_OUTPUT_ROOT / "00-output"
-    VERBOSE_OUTPUT = False
-    ENABLE_DEBUG_VIZ = False
     LOG_LEVEL = "INFO"
-    YOLO_CONF_DETECTION = 0.25  # Tighter for production
-    TRUST_OCR_THRESHOLD = 0.85  # Real-world threshold
+    VERBOSE_OUTPUT = False  # Keep the console cleaner in prod
+
+# ============================================================================
+# --- HITL & PIPELINE CONSTANTS (Required for Dashboard) ---
+# ============================================================================
+# These remain active in BOTH modes to support Streamlit manual review
+ENABLE_DEBUG_VIZ = True      
+YOLO_CONF_DETECTION = 0.12   
+TRUST_OCR_THRESHOLD = 1.10
+
 
 # Derived Paths
 INPUT_DIR = ENV_PATHS[WORK_ENV]["INPUT"]
@@ -81,9 +88,10 @@ PREPROCESSED_DIR = DEBUG_FOLDERS["preprocessed"]
 # ============================================================================
 # --- DIRECTORY INITIALIZATION ---
 # ============================================================================
-_REQUIRED_DIRS = [OUTPUT_DIR, REPORTS_DIR, DASHBOARD_DIR, LOG_DIR, HOLDING_ZONE_DIR]
-if APP_MODE == "DEVELOPMENT":
-    _REQUIRED_DIRS += [DEBUG_BASE_DIR] + list(DEBUG_FOLDERS.values())
+_REQUIRED_DIRS = [
+    OUTPUT_DIR, REPORTS_DIR, DASHBOARD_DIR, LOG_DIR, 
+    HOLDING_ZONE_DIR, DEBUG_BASE_DIR
+] + list(DEBUG_FOLDERS.values())
 
 for directory in _REQUIRED_DIRS: 
     directory.mkdir(parents=True, exist_ok=True)
@@ -105,11 +113,10 @@ SUPPORTED_EXTENSIONS = {"*.pdf", "*.jpg", "*.jpeg", "*.png"}
 MIN_ROTATION_ANGLE_DETECTION = 5
 
 # ============================================================================
-# --- JOB NUMBER DETECTION (YOLO) ---
+# --- YOLO DETECTION ---
 # ============================================================================
 
 YOLO_MODEL_PATH = PROJECT_ROOT / "models" / "jobnum_detection_V2.pt"
-YOLO_CONF_DETECTION = 0.12  # Dropped from 0.25 to ~0.12 to act as a wide net
 YOLO_ENABLED = True
 
 # Blue Stamp Enhancement Configuration
@@ -176,14 +183,7 @@ PADDLE_OCR_CONFIG = {
 
 TEMPLATE_MATCHING_ENABLED = True
 ENABLE_MULTI_ROTATION_OCR = True
-# ENABLE_DEBUG_VIZ = True
 
 # Parallel workers for batch processing. 
 # RECOMMENDED: 2-3 for 16GB RAM, 6-8 for 32GB+ RAM (~3GB per worker)
 MAX_WORKERS = 4
-
-# ============================================================================
-# --- PRODUCTION HITL SETTINGS ---
-# ============================================================================
-# Files with confidence below this score will be flagged for manual review
-TRUST_OCR_THRESHOLD = 1.10

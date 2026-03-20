@@ -345,7 +345,9 @@ if __name__ == "__main__":
                 known_jobs=known_jobs_list,
                 elapsed_time=tracker.elapsed
             )
-            
+            # Backup the raw data with the specific batch ID so the dashboard can map it later
+            backup_json = REPORTS_DIR / f"{session.batch_id}_run_data.json"
+            shutil.copy2(session.raw_data_json, backup_json)
             # =========================================================
             # STAGE 5: AUTO-VERIFICATION (Bulletproofed)
             # =========================================================
