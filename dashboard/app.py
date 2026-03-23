@@ -77,6 +77,10 @@ def load_historical_data() -> pd.DataFrame:
             raw_date = pd.to_datetime(data.get("timestamp"))
             total_processed = summary.get("total_in_batch", 0)
             
+            # Safe extraction for backwards-compatibility on older JSON schemas
+            verified_files = summary.get("verified_files", total_processed)
+            verified_trusted = summary.get("verified_trusted_count", int(round(summary.get("theoretical_automation", 0.0) * total_processed)))
+            
             records.append({
                 "Batch ID": batch_info.get("batch_id", j_file.stem),
                 "Raw_Date": raw_date,
@@ -86,6 +90,8 @@ def load_historical_data() -> pd.DataFrame:
                 "Actual OCR Accuracy (%)": summary.get("actual_accuracy", summary.get("accuracy", 0.0)) * 100,
                 "Silent Failure Rate (%)": summary.get("silent_failure_rate", 0.0) * 100,
                 "Total Processed": total_processed,
+                "Verified Processed": verified_files,
+                "Verified Trusted": verified_trusted,
                 "Actual Typos Fixed": summary.get("human_corrections", 0),
                 "Theoretical Auto Count": int(round(summary.get("theoretical_automation", 0.0) * total_processed)),
                 "Silent Failures": summary.get("silent_failures", 0),
@@ -207,18 +213,26 @@ def update_batch_metrics_stateless(batch_id: str):
         similarity_scores = []
         method_stats = {}
         
+        # PENDING TRACKERS
+        pending_count = 0
+        verified_trusted_count = 0
+        verified_files_count = 0
+        
         for f_data in raw_run.get("files", []):
             c = float(f_data.get("confidence", 0.0))
             system_guess = str(f_data.get("corrected_job") or f_data.get("raw_job") or "").strip()
             method = str(f_data.get("method", "unknown"))
             confidences.append(c)
             
-            if method not in method_stats:
-                method_stats[method] = {"total": 0, "correct": 0}
-            method_stats[method]["total"] += 1
+            filename = f_data.get("filename")
+            
+            # Detect Pending Status (Optimistic Math Fix)
+            is_pending = False
+            if filename and (HOLDING_ZONE_DIR / filename).exists():
+                is_pending = True
+                pending_count += 1
             
             # Check if this file was harvested as a human correction
-            filename = f_data.get("filename")
             is_corrected = False
             if filename:
                 meta_path = TRAINING_DATA_DIR / f"{Path(filename).stem}_meta.json"
@@ -230,20 +244,37 @@ def update_batch_metrics_stateless(batch_id: str):
                         m_data = json.load(mf)
                         similarity_scores.append(m_data.get("similarity_score", 0.0))
                     
-            if not is_corrected:
-                method_stats[method]["correct"] += 1
-                    
-            # Shadow Mode Calculation (Would it have passed without review?)
-            if c >= SHADOW_THRESHOLD and system_guess and system_guess != "failed":
+            # Shadow Mode Checks
+            is_trusted = (c >= SHADOW_THRESHOLD and system_guess and system_guess != "failed")
+            if is_trusted:
                 theoretical_auto_count += 1
-                if is_corrected:
-                    silent_failures += 1
+                
+            # STRICT VERIFICATION: Only tally methods & failures if the file is proven (not pending)
+            if not is_pending:
+                verified_files_count += 1
+                
+                # Pure Method Tracking
+                if method not in method_stats:
+                    method_stats[method] = {"total": 0, "correct": 0}
+                method_stats[method]["total"] += 1
+                
+                if not is_corrected:
+                    method_stats[method]["correct"] += 1
+                    
+                # Strict Silent Failure Rate Tracking
+                if is_trusted:
+                    verified_trusted_count += 1
+                    if is_corrected:
+                        silent_failures += 1
                     
         theoretical_automation_rate = theoretical_auto_count / total_files if total_files > 0 else 0.0
-        silent_failure_rate = silent_failures / total_files if total_files > 0 else 0.0
         
-        correct_guesses = total_files - actual_corrections_made
-        actual_accuracy = correct_guesses / total_files if total_files > 0 else 0.0
+        # Strict Accuracy Computation (Computed against verified files, not total files)
+        correct_guesses = verified_files_count - actual_corrections_made
+        actual_accuracy = correct_guesses / verified_files_count if verified_files_count > 0 else 0.0
+        
+        # Strict Silent Failure Computation (Computed against verified files that AI trusted)
+        silent_failure_rate = silent_failures / verified_trusted_count if verified_trusted_count > 0 else 0.0
         
         avg_speed = total_wall_time / total_files if total_files > 0 else 0.0
         mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
@@ -253,6 +284,9 @@ def update_batch_metrics_stateless(batch_id: str):
             "timestamp": datetime.now().isoformat(),
             "summary": {
                 "total_in_batch": total_files,
+                "verified_files": verified_files_count,
+                "pending_files": pending_count,
+                "verified_trusted_count": verified_trusted_count,
                 "human_corrections": actual_corrections_made,
                 "theoretical_automation": theoretical_automation_rate,
                 "actual_accuracy": actual_accuracy,
@@ -275,6 +309,42 @@ def update_batch_metrics_stateless(batch_id: str):
             
     except Exception as e:
         st.warning(f"Metric generation failed: {e}")
+
+def sync_historical_metrics():
+    """
+    Scans the reports directory for raw batch data. If a batch does not have
+    a corresponding compiled metrics JSON in the dashboard folder, it generates it.
+    This ensures runs (especially 100% automated ones) appear in analytics instantly.
+    """
+    reports_dir = OUTPUT_DIR / "reports"
+    if not reports_dir.exists():
+        return
+        
+    new_metrics_generated = False
+    
+    for report_file in reports_dir.glob("*_run_data.json"):
+        if report_file.name == "latest_run_data.json":
+            continue
+            
+        # Fix string parsing flaw to prevent greedy replace if "_run_data" occurs elsewhere
+        if hasattr(report_file.stem, "removesuffix"):
+            batch_id = report_file.stem.removesuffix("_run_data")
+        else:
+            batch_id = report_file.stem[:-9] if report_file.stem.endswith("_run_data") else report_file.stem
+            
+        metrics_file = DASHBOARD_DIR / f"{batch_id}_metrics.json"
+        
+        # If the compiled metrics file is missing, build it statelessly right now
+        if not metrics_file.exists():
+            st.toast(f"Generating new metrics for {batch_id}...", icon="🔄")
+            update_batch_metrics_stateless(batch_id)
+            new_metrics_generated = True
+            
+    # Streamlit Caching Race Condition: Invalidate cache so historical data is loaded
+    if new_metrics_generated:
+        st.toast("New metrics generated. Invalidating cache.", icon="✅")
+        load_historical_data.clear()
+        load_method_stats.clear()
 
 # =============================================================================
 # MODAL DIALOG: INTERACTIVE IMAGE VIEWER
@@ -321,6 +391,9 @@ def show_full_drawing(image_path: Path, scan_id: str):
 # =============================================================================
 def main():
     st.title("📊 OCR Production Command Center")
+    
+    # --- Sync historical data on startup so 100% automated batches appear ---
+    sync_historical_metrics()
     
     if not HOLDING_ZONE_DIR.exists():
         HOLDING_ZONE_DIR.mkdir(parents=True, exist_ok=True)
@@ -449,6 +522,11 @@ def main():
                                 
                             # Rebuild UI and Data Lake instantly for the specific batch
                             update_batch_metrics_stateless(origin_batch_id)
+                            
+                            # Cache Invalidation Fix
+                            load_historical_data.clear() 
+                            load_method_stats.clear()
+                            
                             st.rerun()
 
     # =========================================================================
@@ -461,18 +539,22 @@ def main():
         else:
             st.markdown("### 🏆 Pipeline Efficiency (All Time)")
             
-            # --- GLOBAL MATH FIX (Avoid "Average of Averages") ---
+            # --- GLOBAL MATH FIX (Strict Accuracy Computation) ---
             total_processed_all_time = df['Total Processed'].sum()
+            total_verified_all_time = df['Verified Processed'].sum()
             total_typos_all_time = df['Actual Typos Fixed'].sum()
-            total_accurate_all_time = total_processed_all_time - total_typos_all_time
             
-            global_accuracy = (total_accurate_all_time / total_processed_all_time * 100) if total_processed_all_time > 0 else 0.0
+            total_accurate_all_time = total_verified_all_time - total_typos_all_time
+            global_accuracy = (total_accurate_all_time / total_verified_all_time * 100) if total_verified_all_time > 0 else 0.0
             
             total_theo_auto = df['Theoretical Auto Count'].sum()
             global_theo_auto = (total_theo_auto / total_processed_all_time * 100) if total_processed_all_time > 0 else 0.0
             
             total_silent_failures = df['Silent Failures'].sum()
-            global_silent_rate = (total_silent_failures / total_processed_all_time * 100) if total_processed_all_time > 0 else 0.0
+            total_verified_trusted_all_time = df['Verified Trusted'].sum()
+            
+            # Strict Global Silent Failure Rate
+            global_silent_rate = (total_silent_failures / total_verified_trusted_all_time * 100) if total_verified_trusted_all_time > 0 else 0.0
             
             # --- ROW 1: QUALITY & RISK METRICS ---
             kpi1, kpi2, kpi3, kpi4 = st.columns(4)
@@ -492,7 +574,11 @@ def main():
             # Isolated Machine Speed Data (Filtering out legacy 0.0s runs)
             df_valid_speed = df[df['Last Batch OCR Time (s)'] > 0]
             last_run_time = df_valid_speed['Last Batch OCR Time (s)'].iloc[-1] if not df_valid_speed.empty else 0.0
-            global_avg_speed = df_valid_speed['Speed (Sec / Scan)'].mean() if not df_valid_speed.empty else 0.0
+            
+            # Global Average Speed (Volume Weighted)
+            total_time_valid = df_valid_speed['Last Batch OCR Time (s)'].sum()
+            total_processed_valid = df_valid_speed['Total Processed'].sum()
+            global_avg_speed = (total_time_valid / total_processed_valid) if total_processed_valid > 0 else 0.0
             
             v_kpi3.metric("Last Batch OCR Time", f"{last_run_time:.1f}s", help="Total processing time for the Python Orchestrator script.")
             v_kpi4.metric("Avg Speed (Sec / Scan)", f"{global_avg_speed:.1f}s")
@@ -541,14 +627,26 @@ def main():
                 else:
                     avg_sim = 100.0  # Perfect system
                 
-                # Dynamic coloring based on Levenshtein distance thresholds
-                sim_color = "#27AE60" if avg_sim > 85 else "#F39C12" if avg_sim > 60 else "#E74C3C"
-                st.markdown(f"<h1 style='color: {sim_color}; font-size: 3rem;'>{avg_sim:.1f}%</h1>", unsafe_allow_html=True)
-                
-                if avg_sim > 85:
-                    st.caption("✅ High Similarity: Most errors are minor details (e.g., missing suffixes).")
+                # 3-Tier Dynamic Coloring and Messaging for Typo Severity
+                if avg_sim >= 90.0:
+                    sim_color = "#27AE60"  # Green
+                    sim_icon = "✅"
+                    sim_title = "High Similarity"
+                    sim_desc = "Errors are minor optical confusions (e.g., 'O' vs '0')."
+                elif avg_sim >= 80.0:
+                    sim_color = "#F39C12"  # Orange
+                    sim_icon = "⚠️"
+                    sim_title = "Moderate Similarity"
+                    sim_desc = "Partial captures. The AI is likely dropping suffixes or prefixes."
                 else:
-                    st.caption("🚨 Low Similarity: The AI is heavily hallucinating answers.")
+                    sim_color = "#E74C3C"  # Red
+                    sim_icon = "🚨"
+                    sim_title = "Low Similarity"
+                    sim_desc = "The AI is heavily hallucinating answers or reading the wrong text block."
+                
+                # Render the UI
+                st.markdown(f"<h1 style='color: {sim_color}; font-size: 3rem;'>{avg_sim:.1f}%</h1>", unsafe_allow_html=True)
+                st.caption(f"{sim_icon} **{sim_title}:** {sim_desc}")
 
             with col_diag2:
                 st.markdown("#### 🎯 Accuracy by Extraction Method (Lifetime)")

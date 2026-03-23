@@ -86,8 +86,14 @@ def _safe_get(d: Dict[str, Any], key: str, default: Any = None) -> Any:
 
 def _extract_ocr_method(method_str: str) -> str:
     if not method_str: return "unknown"
+    
+    # Catch the parenthesis version first
+    if "(+smart_filing:" in method_str:
+        return method_str.split("(+smart_filing:")[0].strip()
+        
     if "smart_filing:" in method_str:
         return method_str.split("smart_filing:")[0].strip()
+        
     return method_str.strip()
 
 def _extract_confidence(method_str: str, fallback: Optional[float] = None) -> float:
