@@ -2,6 +2,13 @@
 TITLE "OCR Production Pipeline and Dashboard [PROD]"
 COLOR 0B
 
+:: --- BULLETPROOFING DIRECTORY CONTEXT ---
+:: Define a user-friendly variable for the current directory
+set "PROJECT_ROOT=%~dp0"
+
+:: Force the command prompt to change to the project root
+cd /d "%PROJECT_ROOT%"
+
 echo ==================================================
 echo       STARTING OCR PRODUCTION PIPELINE
 echo ==================================================
@@ -30,6 +37,16 @@ echo.
 echo [1/2] Running main.py orchestrator...
 python main.py --input-dir "%INPUT_DIRECTORY%" --batch-id "%BATCH_ID%"
 
+:: --- ERROR HANDLING GUARDRAIL ---
+:: Prevent the dashboard from launching if the Python OCR engine crashed
+if %ERRORLEVEL% neq 0 (
+    echo.
+    echo 🚨 ERROR: main.py exited with an error code.
+    echo Halting pipeline before launching the dashboard.
+    pause
+    exit /b %ERRORLEVEL%
+)
+
 echo.
 echo ==================================================
 echo       OCR COMPLETE. LAUNCHING DASHBOARD...
@@ -42,8 +59,7 @@ echo Please keep this window open until you are done reviewing.
 echo Press Ctrl+C in this window when you are ready to shut down the dashboard.
 echo.
 
-:: Note: Streamlit will automatically read the APP_MODE=PRODUCTION variable
-:: and look in the `00-output` folder instead of `00-output-dev`
-streamlit run dashboard/app.py
+:: Use the absolute path variable to guarantee Streamlit finds the file
+streamlit run "%PROJECT_ROOT%dashboard\app.py"
 
 pause
