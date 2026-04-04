@@ -1,6 +1,16 @@
 import os
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
+
+# ============================================================================
+# --- CORE APPLICATION PATHS & ENV LOADING ---
+# ============================================================================
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR
+
+# Explicitly load from the project root so it works even if launched from /scripts/
+load_dotenv(BASE_DIR / ".env")  
 
 # ============================================================================
 # --- ENVIRONMENT STABILITY OVERRIDES ---
@@ -20,58 +30,88 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["KMP_BLOCKTIME"] = "0"
 
 # ============================================================================
-# --- CORE APPLICATION PATHS ---
+# --- EXECUTION MODE & PATH ROUTING ---
+# ============================================================================
+WORK_ENV = os.getenv("WORK_ENV", "OFFICE").upper()
+APP_MODE = os.getenv("APP_MODE", "PRODUCTION").upper()
+
+# Dynamically pull the base paths from your .env file to protect privacy
+input_key = f"{WORK_ENV}_INPUT_DEV" if APP_MODE == "DEVELOPMENT" else f"{WORK_ENV}_INPUT_PROD"
+output_key = f"{WORK_ENV}_OUTPUT_DEV" if APP_MODE == "DEVELOPMENT" else f"{WORK_ENV}_OUTPUT_PROD"
+
+try:
+    INPUT_DIR = Path(os.getenv(input_key))
+    # We pull the root output directory from .env
+    RAW_OUTPUT_ROOT = Path(os.getenv(output_key))
+except TypeError:
+    raise ValueError(f"CRITICAL: Missing configuration in .env for {input_key} or {output_key}")
+
+# --- SMART PATH REDIRECTION ---
+if APP_MODE == "DEVELOPMENT":
+    OUTPUT_DIR = RAW_OUTPUT_ROOT / "00-output-dev"
+    LOG_LEVEL = "DEBUG"
+    VERBOSE_OUTPUT = True
+else:
+    OUTPUT_DIR = RAW_OUTPUT_ROOT / "00-output-prod"
+    LOG_LEVEL = "INFO"
+    VERBOSE_OUTPUT = False  # Keep the console cleaner in prod
+
+# ============================================================================
+# --- VALIDATION SETTINGS & HITL CONSTANTS ---
 # ============================================================================
 
-BASE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BASE_DIR
-
-ENV_PATHS = {
-    "OFFICE": {
-        "INPUT": Path("G:/Scans/preprocess/00-input/0-test"),
-        "OUTPUT": Path("G:/Scans/preprocess/00-output"),
-    },
-    "HOME": {
-        "INPUT": Path("C:/Users/Kimera/Downloads/OCR/02-Scans/preprocess/00-input/02-batch"),
-        "OUTPUT": Path("C:/Users/Kimera/Downloads/OCR/02-Scans/preprocess/00-output"),
-    },
+VALIDATION_CONFIG = {
+    "year_window_past": 4,      # Accept 4 years in past
+    "year_window_future": 1,    # Accept 1 year in future
+    "trust_ocr_threshold": 0.85, # The exact confidence required to bypass human review
 }
 
-WORK_ENV = os.getenv("WORK_ENV", "OFFICE")
-if WORK_ENV not in ENV_PATHS:
-    raise ValueError(f"Unknown WORK_ENV: '{WORK_ENV}'. Available: {list(ENV_PATHS.keys())}")
+# Link HITL variables to the single source of truth
+TRUST_OCR_THRESHOLD = VALIDATION_CONFIG["trust_ocr_threshold"]
 
-INPUT_DIR = ENV_PATHS[WORK_ENV]["INPUT"]
-OUTPUT_DIR = ENV_PATHS[WORK_ENV]["OUTPUT"]
+# --- TESTING CONTROLS ---
+# Set to True to force 100% of files into the Holding Zone for manual Action Queue review
+FORCE_MANUAL_REVIEW = True
+
+FUZZY_MATCH_CUTOFF = 85
+ALLOWED_SEPARATORS = "-. ="
+
+SMART_FILING_CONFIG = {
+    "neighbor_window": 2,          
+    "max_physical_distance": 2,    
+    "max_digit_dist": 1,
+    "debug_mode": True,            
+}
+
+# ============================================================================
+# --- DERIVED DIRECTORIES & INITIALIZATION ---
+# ============================================================================
+
 REPORTS_DIR = OUTPUT_DIR / "reports"
 LOG_DIR = OUTPUT_DIR / "logs"
+DASHBOARD_DIR = OUTPUT_DIR / "dashboard_data"
+HOLDING_ZONE_DIR = OUTPUT_DIR / "holding_zone"
 DEBUG_BASE_DIR = OUTPUT_DIR / "debug"
 
-# JSON-First Architecture: Dashboard Data Lake
-DASHBOARD_DIR = OUTPUT_DIR / "dashboard_data"
-
-# Debug Sub-directories (Consolidated for I/O efficiency)
 DEBUG_FOLDERS = {
     "preprocessed": DEBUG_BASE_DIR / "1_preprocess",
-    "macro_vision": DEBUG_BASE_DIR / "2_macro_vision",  # YOLO, Page regions, Title Blocks
-    "micro_vision": DEBUG_BASE_DIR / "3_micro_vision",  # ROI crops, OCR output cards
+    "macro_vision": DEBUG_BASE_DIR / "2_macro_vision",
+    "micro_vision": DEBUG_BASE_DIR / "3_micro_vision",
 }
+PREPROCESSED_DIR = DEBUG_FOLDERS["preprocessed"]
 
-# CRITICAL FIX: Re-pointed PREPROCESSED_DIR directly into the debug sub-folder.
-# This prevents an external directory from being created, while preventing ImportErrors in other scripts.
-PREPROCESSED_DIR = DEBUG_FOLDERS["preprocessed"] 
+_REQUIRED_DIRS = [
+    OUTPUT_DIR, REPORTS_DIR, DASHBOARD_DIR, LOG_DIR, 
+    HOLDING_ZONE_DIR, DEBUG_BASE_DIR
+] + list(DEBUG_FOLDERS.values())
 
-# Auto-create all required directories (including the new dashboard lake)
-_ALL_DIRS = [OUTPUT_DIR, REPORTS_DIR, DASHBOARD_DIR, LOG_DIR, DEBUG_BASE_DIR] + list(DEBUG_FOLDERS.values())
-for directory in _ALL_DIRS: 
+for directory in _REQUIRED_DIRS: 
     directory.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================
 # --- LOGGING & PDF SETTINGS ---
 # ============================================================================
 
-VERBOSE_OUTPUT = True
-LOG_LEVEL = "DEBUG"  
 LOG_FILENAME = LOG_DIR / "scans_job_extraction.log"
 LOG_FILE_MAX_BYTES = 10 * 1024 * 1024  
 LOG_FILE_BACKUP_COUNT = 5
@@ -84,46 +124,28 @@ SUPPORTED_EXTENSIONS = {"*.pdf", "*.jpg", "*.jpeg", "*.png"}
 MIN_ROTATION_ANGLE_DETECTION = 5
 
 # ============================================================================
-# --- JOB NUMBER DETECTION (YOLO) ---
+# --- YOLO DETECTION ---
 # ============================================================================
 
 YOLO_MODEL_PATH = PROJECT_ROOT / "models" / "jobnum_detection_V2.pt"
-YOLO_CONF_DETECTION = 0.12  # Dropped from 0.25 to ~0.12 to act as a wide net
 YOLO_ENABLED = True
+YOLO_CONF_DETECTION = 0.12   
+ENABLE_DEBUG_VIZ = True      
 
 # Blue Stamp Enhancement Configuration
 BLUE_STAMP_ENHANCEMENT_CONFIG = {
     "enabled": True,
-    "saturation_boost": 1.8,        # Boost blue saturation (1.0 = no change, 2.0 = double)
-    "value_boost": 1.3,             # Boost blue brightness
-    "clahe_clip_limit": 4.0,        # CLAHE contrast limit (higher = more contrast)
-    "clahe_tile_size": (8, 8),      # CLAHE grid size
-    "dilation_iterations": 1,       # Morphological dilation (restore faded strokes)
-    "kernel_size": 3,               # Morphological kernel size
-    "gamma": 0.7,                   # Gamma correction (<1.0 brightens, >1.0 darkens)
-    "hue_range": (85, 130),         # Blue-green hue range in HSV
-    "min_saturation": 20,           # Minimum saturation to consider as blue
+    "saturation_boost": 1.8,        
+    "value_boost": 1.3,             
+    "clahe_clip_limit": 4.0,        
+    "clahe_tile_size": (8, 8),      
+    "dilation_iterations": 1,       
+    "kernel_size": 3,               
+    "gamma": 0.7,                   
+    "hue_range": (85, 130),         
+    "min_saturation": 20,           
     "debug_mode": True,
-    "try_multiple_methods": True    # Try all methods and pick best result
-}
-
-# ============================================================================
-# --- VALIDATION SETTINGS ---
-# ============================================================================
-
-VALIDATION_CONFIG = {
-    "year_window_past": 4,      # Accept 5 years in past
-    "year_window_future": 1,    # Accept 2 years in future (buffer for early scans)
-    "trust_ocr_threshold": 0.70, # Confidence to override year validation
-}
-FUZZY_MATCH_CUTOFF = 85
-ALLOWED_SEPARATORS = "-. ="
-
-SMART_FILING_CONFIG = {
-    "neighbor_window": 2,          
-    "max_physical_distance": 2,    
-    "max_digit_dist": 1,
-    "debug_mode": True,            
+    "try_multiple_methods": True    
 }
 
 # ============================================================================
@@ -145,7 +167,7 @@ PADDLE_OCR_CONFIG = {
     "lang": "en",
     "use_gpu": False,
     "show_log": False,
-    "enable_mkldnn": True,  # FIXED: Required for stability on Windows
+    "enable_mkldnn": True,  
     "rec_batch_num": 1,
 }
 
@@ -155,8 +177,6 @@ PADDLE_OCR_CONFIG = {
 
 TEMPLATE_MATCHING_ENABLED = True
 ENABLE_MULTI_ROTATION_OCR = True
-ENABLE_DEBUG_VIZ = True
 
 # Parallel workers for batch processing. 
-# RECOMMENDED: 2-3 for 16GB RAM, 6-8 for 32GB+ RAM (~3GB per worker)
 MAX_WORKERS = 4

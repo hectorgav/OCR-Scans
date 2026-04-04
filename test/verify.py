@@ -17,10 +17,28 @@ import re
 import json
 import argparse
 import csv
+import sys
 from pathlib import Path
 from datetime import datetime
 from collections import Counter
 from typing import Dict, List, Optional, Any
+
+# =============================================================================
+# PATH AGNOSTIC RESOLUTION (Bulletproof Imports)
+# =============================================================================
+_CURRENT_DIR = Path(__file__).resolve().parent
+
+# Automatically find the Project Root by looking for config.py
+if (_CURRENT_DIR / "config.py").exists():
+    PROJECT_ROOT = _CURRENT_DIR
+elif (_CURRENT_DIR.parent / "config.py").exists():
+    PROJECT_ROOT = _CURRENT_DIR.parent
+else:
+    PROJECT_ROOT = _CURRENT_DIR
+
+# Inject Project Root into sys.path so 'import config' works from any folder
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # =============================================================================
 # CONFIG IMPORTS & PATHS
@@ -45,9 +63,13 @@ DEFAULT_GROUND_TRUTH: Dict[str, str] = {
     "scan229": "250240-11", "scan230": "250405-03", "scan231": "250405-03",
     "scan234": "250513-05", "scan235": "250513-05", "scan236": "250405-06",
     "scan237": "250405-06", "scan238": "250405-06", "scan239": "250405-06",
-    # Note: Keep the rest of your default dictionary here!
 }
-GROUND_TRUTH_DIR = Path(__file__).resolve().parent / "ground_truth"
+
+# Dynamically locate the ground_truth directory
+if (_CURRENT_DIR / "ground_truth").exists():
+    GROUND_TRUTH_DIR = _CURRENT_DIR / "ground_truth"
+else:
+    GROUND_TRUTH_DIR = PROJECT_ROOT / "ground_truth"
 
 
 def normalize_text(text: str) -> str:

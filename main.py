@@ -17,7 +17,7 @@
 
 import time
 import os
-import sys  # <-- CRITICAL FIX: Ensures we use the active python environment
+import sys
 import logging
 import argparse
 import subprocess
@@ -52,7 +52,7 @@ except Exception:
 # =============================================================================
 from config import (
     INPUT_DIR, PREPROCESSED_DIR, REPORTS_DIR, MAX_WORKERS,
-    SUPPORTED_EXTENSIONS
+    SUPPORTED_EXTENSIONS, TRUST_OCR_THRESHOLD, FORCE_MANUAL_REVIEW, HOLDING_ZONE_DIR
 )
 
 from src.pipeline.extractor import extract_job_number
@@ -64,7 +64,6 @@ from src.utils.log import get_logger, log_pipeline_start, log_error, log_banner
 from src.utils.statistics import generate_pipeline_run_data, WallClockTracker
 
 logger = get_logger("main_orchestrator")
-
 
 # =============================================================================
 # SESSION CONTEXT MANAGER
@@ -237,9 +236,14 @@ def run_smart_filing_and_routing(
     known_jobs: Optional[Set[str]],
     elapsed_time: Optional[float] = None
 ):
+    """
+    Stage 3 & 4: Applies consensus logic to finalize job numbers and routes 
+    files based on AI confidence and manual review settings.
+    """
     logger_final = get_logger("final_stage")
     log_banner(logger_final, "STARTING STAGE 3: SMART FILING CONSENSUS")
 
+    # 1. Convert raw results into Records for the consensus engine
     records = [
         Record(
             filename=r["filename"],
@@ -250,8 +254,10 @@ def run_smart_filing_and_routing(
         for r in results
     ]
 
+    # 2. Run the Batch Correction Logic
     corrected_records = smart_correct_batch(records, known_jobs=known_jobs)
 
+    # 3. Update Results with Corrected Data
     corrections_count = 0
     for res, rec in zip(results, corrected_records):
         original_job = res["job_number"]
@@ -274,21 +280,56 @@ def run_smart_filing_and_routing(
 
     logger_final.info(f"Smart Filing complete. {corrections_count} files corrected.")
 
-    log_banner(logger_final, "STARTING STAGE 4: ROUTING & REPORTING")
+    # ---------------------------------------------------------
+    # STAGE 4: HITL-AWARE ROUTING & REPORTING
+    # ---------------------------------------------------------
+    log_banner(logger_final, "STARTING STAGE 4: ROUTING & REPORTING (HITL ENABLED)")
+    
     for res in tqdm(results, desc="Routing"):
         original_path = Path(res["original_path"]) 
+        filename = res["filename"]
+        confidence = res.get("confidence", 0.0)
 
-        if res["status"] == "Success" and res.get("job_number") and res["job_number"] not in FAILED_JOB_MARKERS:
+        # --- HITL ROUTING LOGIC ---
+        # Evaluate if the AI can be trusted based on configuration
+        is_trusted = (res["status"] == "Success" and confidence >= TRUST_OCR_THRESHOLD)
+
+        # Apply Global Manual Override (Forces everything to Holding Zone for testing)
+        if FORCE_MANUAL_REVIEW:
+            is_trusted = False
+
+        # --- PHYSICAL FILE ROUTING ---
+        if is_trusted and res.get("job_number") and res["job_number"] not in FAILED_JOB_MARKERS:
+            # AUTOMATED PATH: AI is confident and passed all validation checks
             route_to_success(original_path, res["job_number"])
+            logger_final.info(f"✅ Trusted OCR: {filename} -> {res['job_number']}")
         else:
-            route_to_failed(original_path, error=str(res.get("error", "unknown")))
+            # MANUAL REVIEW PATH: Low confidence or forced review mode
+            # Moving files to Holding Zone triggers the Streamlit Action Queue
+            HOLDING_ZONE_DIR.mkdir(parents=True, exist_ok=True)
+            try:
+                # We use shutil.move to relocate the file for the dashboard to find
+                import shutil
+                shutil.move(str(original_path), str(HOLDING_ZONE_DIR / original_path.name))
+                logger_final.warning(f"🛠️ HITL Required: {filename} moved to Holding Zone")
+            except Exception as e:
+                logger_final.error(f"Failed to move {filename} to Holding Zone: {e}")
 
+    # 4. Generate Final Batch Report
     formatted_report = generate_pipeline_run_data(
         results=results, 
         output_json_path=session.raw_data_json,
         batch_id=session.batch_id,
         elapsed_time=elapsed_time
     )
+
+    # --- HITL DASHBOARD FIX ---
+    # Save a permanent copy of the report named with the specific batch_id.
+    # The Streamlit dashboard requires this file to map guesses to the Action Queue images.
+    import shutil
+    permanent_json = session.raw_data_json.with_name(f"{session.batch_id}_run_data.json")
+    shutil.copy2(str(session.raw_data_json), str(permanent_json))
+    # --------------------------
 
     print("\n" + "=" * 80)
     print(formatted_report)
@@ -347,11 +388,14 @@ if __name__ == "__main__":
             if session.auto_verify_batch:
                 main_logger.info(f"🔄 Triggering Auto-Verification against: {session.auto_verify_batch}.csv")
                 
-                # Resolves the absolute path to verify.py so subprocess never gets lost
-                verify_script_path = Path(__file__).resolve().parent / "verify.py"
+                # Dynamic Path Resolution: Check root, then check 'test' folder
+                _root = Path(__file__).resolve().parent
+                if (_root / "verify.py").exists():
+                    verify_script_path = _root / "verify.py"
+                else:
+                    verify_script_path = _root / "test" / "verify.py"
                 
                 try:
-                    # Uses sys.executable to ensure we use your active Python venv
                     subprocess.run(
                         [sys.executable, str(verify_script_path), "--batch", session.auto_verify_batch], 
                         check=True

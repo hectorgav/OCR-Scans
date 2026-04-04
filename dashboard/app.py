@@ -1,29 +1,46 @@
 # =============================================================================
-# OCR PIPELINE DASHBOARD (Streamlit)
+# OCR PIPELINE DASHBOARD (PRODUCTION HITL)
 # =============================================================================
 #
-# Usage:
-#   Navigate to your OCR_Project_Root in the terminal and run:
-#   streamlit run dashboard/app.py
+# This dashboard serves as the High-Speed Validation Gateway and Analytics
+# Command Center for the OCR Pipeline. It operates in a "Shadow Mode",
+# enforcing 100% manual review while calculating theoretical automation rates.
 #
+# Features:
+# - Single-Piece Flow Verification Queue
+# - Active Learning Data Harvesting
+# - Stateless Metric Recalculation
+# - Hardware Processing Speed Isolation
+# - Typo Severity Tracking (Levenshtein Distance)
 # =============================================================================
 
 import sys
 import json
+import shutil
+import time
+from datetime import datetime
 from pathlib import Path
+from difflib import SequenceMatcher
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 from PIL import Image
 
-# --- PATH RESOLUTION ---
+# =============================================================================
+# PATH RESOLUTION & CONFIGURATION
+# =============================================================================
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
-from config import DASHBOARD_DIR, DEBUG_FOLDERS
+from config import DASHBOARD_DIR, DEBUG_FOLDERS, HOLDING_ZONE_DIR, OUTPUT_DIR, TRUST_OCR_THRESHOLD
 
-# --- STREAMLIT PAGE CONFIG ---
+TRAINING_DATA_DIR = OUTPUT_DIR / "training_data"
+SHADOW_THRESHOLD = 0.85  # The theoretical threshold used to track potential time-savings
+
+# =============================================================================
+# STREAMLIT PAGE CONFIGURATION
+# =============================================================================
 st.set_page_config(
     page_title="OCR Pipeline Analytics",
     page_icon="📈",
@@ -32,220 +49,630 @@ st.set_page_config(
 )
 
 # =============================================================================
-# DATA LOADING ENGINE
+# DATA LOADING & METRICS ENGINE
 # =============================================================================
 @st.cache_data(ttl=60)
 def load_historical_data() -> pd.DataFrame:
+    """
+    Scans the data lake for historical batch metrics and compiles them into a DataFrame.
+    Transforms raw timestamps into categorical labels to eliminate idle-time gaps in charts.
+    """
     if not DASHBOARD_DIR.exists():
         return pd.DataFrame()
         
     json_files = sorted(DASHBOARD_DIR.glob("*_metrics.json"))
     json_files = [f for f in json_files if "latest" not in f.name]
     
-    if not json_files:
-        return pd.DataFrame()
-        
     records = []
     for j_file in json_files:
         try:
             with open(j_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                
+            
             summary = data.get("summary", {})
             batch_info = data.get("batch_info", {})
             conf_stats = data.get("confidence_stats", {})
             
+            # Extract raw datetime for sorting purposes
+            raw_date = pd.to_datetime(data.get("timestamp"))
+            total_processed = summary.get("total_in_batch", 0)
+            
+            # Safe extraction for backwards-compatibility on older JSON schemas
+            verified_files = summary.get("verified_files", total_processed)
+            verified_trusted = summary.get("verified_trusted_count", int(round(summary.get("theoretical_automation", 0.0) * total_processed)))
+            
             records.append({
                 "Batch ID": batch_info.get("batch_id", j_file.stem),
-                "Timestamp": pd.to_datetime(data.get("timestamp")),
-                "Accuracy (%)": summary.get("accuracy", 0.0) * 100,
-                "Total Processed": summary.get("total_in_batch", 0),
-                "Total Verified": summary.get("total_verified", 0),
-                "Passed": summary.get("passed", 0),
-                "Verification Errors": summary.get("verification_errors", 0),
-                "Extraction Failures": summary.get("extraction_failures", 0),
-                "Total Errors": summary.get("total_errors", 0),
+                "Raw_Date": raw_date,
+                # Create a strict string label (e.g., "Mar 18, 15:30") for categorical charting
+                "Run Label": raw_date.strftime("%b %d, %H:%M:%S"),
+                "Theoretical Automation (%)": summary.get("theoretical_automation", 0.0) * 100,
+                "Actual OCR Accuracy (%)": summary.get("actual_accuracy", summary.get("accuracy", 0.0)) * 100,
+                "Silent Failure Rate (%)": summary.get("silent_failure_rate", 0.0) * 100,
+                "Total Processed": total_processed,
+                "Verified Processed": verified_files,
+                "Verified Trusted": verified_trusted,
+                "Actual Typos Fixed": summary.get("human_corrections", 0),
+                "Theoretical Auto Count": int(round(summary.get("theoretical_automation", 0.0) * total_processed)),
+                "Silent Failures": summary.get("silent_failures", 0),
+                "Last Batch OCR Time (s)": summary.get("total_wall_time_sec", 0.0),
+                "Speed (Sec / Scan)": summary.get("avg_speed_sec", 0.0),
                 "Mean Confidence": conf_stats.get("mean", 0.0) * 100,
+                "Avg Typo Similarity (%)": summary.get("avg_typo_similarity", 1.0) * 100
             })
-        except Exception as e:
+        except Exception:
             pass
             
     df = pd.DataFrame(records)
     if not df.empty:
-        df = df.sort_values("Timestamp").reset_index(drop=True)
+        # Sort chronologically, then drop the raw date as we only need the label for graphs
+        df = df.sort_values("Raw_Date").reset_index(drop=True)
     return df
 
 @st.cache_data(ttl=60)
-def load_latest_run_details() -> dict:
-    latest_file = DASHBOARD_DIR / "latest_metrics.json"
-    if not latest_file.exists():
-        return {}
+def load_method_stats() -> pd.DataFrame:
+    """
+    Aggregates lifetime accuracy for each specific OCR extraction heuristic.
+    """
+    if not DASHBOARD_DIR.exists():
+        return pd.DataFrame()
+        
+    json_files = sorted(DASHBOARD_DIR.glob("*_metrics.json"))
+    json_files = [f for f in json_files if "latest" not in f.name]
+    
+    aggregated_methods = {}
+    
+    for j_file in json_files:
+        try:
+            with open(j_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            m_stats = data.get("method_stats", {})
+            for method, counts in m_stats.items():
+                if method not in aggregated_methods:
+                    aggregated_methods[method] = {"total": 0, "correct": 0}
+                aggregated_methods[method]["total"] += counts.get("total", 0)
+                aggregated_methods[method]["correct"] += counts.get("correct", 0)
+        except Exception:
+            pass
+            
+    records = []
+    for method, counts in aggregated_methods.items():
+        tot = counts["total"]
+        corr = counts["correct"]
+        acc = (corr / tot * 100) if tot > 0 else 0.0
+        
+        display_name = method.replace("_", " ").title()
+        
+        records.append({
+            "Method": display_name,
+            "Total Processed": tot,
+            "Accuracy (%)": acc
+        })
+        
+    df = pd.DataFrame(records)
+    if not df.empty:
+        df = df.sort_values("Accuracy (%)", ascending=True).reset_index(drop=True)
+    return df
+
+@st.cache_data(ttl=5)
+def get_all_pending_guesses() -> dict:
+    """Loads metadata from ALL run reports to map holding zone files to their origin batch."""
+    guesses = {}
+    reports_dir = OUTPUT_DIR / "reports"
+    
+    if reports_dir.exists():
+        # Scan all preserved batch reports
+        for report_file in reports_dir.glob("*_run_data.json"):
+            if report_file.name == "latest_run_data.json":
+                continue # Skip the generic one
+                
+            try:
+                with open(report_file, 'r', encoding='utf-8') as f:
+                    run_data = json.load(f)
+                    batch_id = run_data.get("batch_metadata", {}).get("batch_id", "Unknown")
+                    
+                    # Inject the origin batch_id into every file's metadata
+                    for f_data in run_data.get("files", []):
+                        f_data["batch_id"] = batch_id
+                        guesses[f_data["filename"]] = f_data
+            except Exception:
+                pass
+    return guesses
+
+def update_batch_metrics_stateless(batch_id: str):
+    """
+    Stateless Metric Recalculation: 
+    Scans the Holding Zone and Training Data folders to instantly rebuild
+    the metrics for a SPECIFIC batch after every single human interaction.
+    """
+    if not batch_id or batch_id == "Unknown":
+        return
         
     try:
-        with open(latest_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
+        run_data_path = OUTPUT_DIR / "reports" / f"{batch_id}_run_data.json"
+        
+        # Fallback for backwards compatibility with older files
+        if not run_data_path.exists():
+            run_data_path = OUTPUT_DIR / "reports" / "latest_run_data.json"
 
+        if not run_data_path.exists():
+            return
+            
+        with open(run_data_path, 'r', encoding='utf-8') as f:
+            raw_run = json.load(f)
+        
+        # Pulls the exact hardware processing time isolated from the orchestrator script
+        total_files = raw_run.get("batch_metadata", {}).get("total_files", 0)
+        total_wall_time = raw_run.get("batch_metadata", {}).get("total_wall_time_sec", 0.0)
+        
+        confidences = []
+        actual_corrections_made = 0
+        theoretical_auto_count = 0
+        silent_failures = 0
+        similarity_scores = []
+        method_stats = {}
+        
+        # PENDING TRACKERS
+        pending_count = 0
+        verified_trusted_count = 0
+        verified_files_count = 0
+        
+        for f_data in raw_run.get("files", []):
+            c = float(f_data.get("confidence", 0.0))
+            system_guess = str(f_data.get("corrected_job") or f_data.get("raw_job") or "").strip()
+            method = str(f_data.get("method", "unknown"))
+            confidences.append(c)
+            
+            filename = f_data.get("filename")
+            
+            # Detect Pending Status (Optimistic Math Fix)
+            is_pending = False
+            if filename and (HOLDING_ZONE_DIR / filename).exists():
+                is_pending = True
+                pending_count += 1
+            
+            # Check if this file was harvested as a human correction
+            is_corrected = False
+            if filename:
+                meta_path = TRAINING_DATA_DIR / f"{Path(filename).stem}_meta.json"
+                if meta_path.exists():
+                    actual_corrections_made += 1
+                    is_corrected = True
+                    # Extract the severity of the typo
+                    with open(meta_path, 'r', encoding='utf-8') as mf:
+                        m_data = json.load(mf)
+                        similarity_scores.append(m_data.get("similarity_score", 0.0))
+                    
+            # Shadow Mode Checks
+            is_trusted = (c >= SHADOW_THRESHOLD and system_guess and system_guess != "failed")
+            if is_trusted:
+                theoretical_auto_count += 1
+                
+            # STRICT VERIFICATION: Only tally methods & failures if the file is proven (not pending)
+            if not is_pending:
+                verified_files_count += 1
+                
+                # Pure Method Tracking
+                if method not in method_stats:
+                    method_stats[method] = {"total": 0, "correct": 0}
+                method_stats[method]["total"] += 1
+                
+                if not is_corrected:
+                    method_stats[method]["correct"] += 1
+                    
+                # Strict Silent Failure Rate Tracking
+                if is_trusted:
+                    verified_trusted_count += 1
+                    if is_corrected:
+                        silent_failures += 1
+                    
+        theoretical_automation_rate = theoretical_auto_count / total_files if total_files > 0 else 0.0
+        
+        # Strict Accuracy Computation (Computed against verified files, not total files)
+        correct_guesses = verified_files_count - actual_corrections_made
+        actual_accuracy = correct_guesses / verified_files_count if verified_files_count > 0 else 0.0
+        
+        # Strict Silent Failure Computation (Computed against verified files that AI trusted)
+        silent_failure_rate = silent_failures / verified_trusted_count if verified_trusted_count > 0 else 0.0
+        
+        avg_speed = total_wall_time / total_files if total_files > 0 else 0.0
+        mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        avg_similarity = sum(similarity_scores) / len(similarity_scores) if similarity_scores else 1.0
+        
+        dashboard_json = {
+            "timestamp": datetime.now().isoformat(),
+            "summary": {
+                "total_in_batch": total_files,
+                "verified_files": verified_files_count,
+                "pending_files": pending_count,
+                "verified_trusted_count": verified_trusted_count,
+                "human_corrections": actual_corrections_made,
+                "theoretical_automation": theoretical_automation_rate,
+                "actual_accuracy": actual_accuracy,
+                "silent_failures": silent_failures,
+                "silent_failure_rate": silent_failure_rate,
+                "total_wall_time_sec": total_wall_time, # Preserves machine speed
+                "avg_speed_sec": avg_speed,
+                "avg_typo_similarity": avg_similarity
+            },
+            "method_stats": method_stats,
+            "confidence_stats": {"mean": mean_conf},
+            "batch_info": {"batch_id": batch_id}
+        }
+        
+        DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
+        with open(DASHBOARD_DIR / f"{batch_id}_metrics.json", 'w', encoding='utf-8') as f:
+            json.dump(dashboard_json, f, indent=2)
+        with open(DASHBOARD_DIR / "latest_metrics.json", 'w', encoding='utf-8') as f:
+            json.dump(dashboard_json, f, indent=2)
+            
+    except Exception as e:
+        st.warning(f"Metric generation failed: {e}")
+
+def sync_historical_metrics():
+    """
+    Scans the reports directory for raw batch data. If a batch does not have
+    a corresponding compiled metrics JSON in the dashboard folder, it generates it.
+    This ensures runs (especially 100% automated ones) appear in analytics instantly.
+    """
+    reports_dir = OUTPUT_DIR / "reports"
+    if not reports_dir.exists():
+        return
+        
+    new_metrics_generated = False
+    
+    for report_file in reports_dir.glob("*_run_data.json"):
+        if report_file.name == "latest_run_data.json":
+            continue
+            
+        # Fix string parsing flaw to prevent greedy replace if "_run_data" occurs elsewhere
+        if hasattr(report_file.stem, "removesuffix"):
+            batch_id = report_file.stem.removesuffix("_run_data")
+        else:
+            batch_id = report_file.stem[:-9] if report_file.stem.endswith("_run_data") else report_file.stem
+            
+        metrics_file = DASHBOARD_DIR / f"{batch_id}_metrics.json"
+        
+        # If the compiled metrics file is missing, build it statelessly right now
+        if not metrics_file.exists():
+            st.toast(f"Generating new metrics for {batch_id}...", icon="🔄")
+            update_batch_metrics_stateless(batch_id)
+            new_metrics_generated = True
+            
+    # Streamlit Caching Race Condition: Invalidate cache so historical data is loaded
+    if new_metrics_generated:
+        st.toast("New metrics generated. Invalidating cache.", icon="✅")
+        load_historical_data.clear()
+        load_method_stats.clear()
 
 # =============================================================================
-# MODAL DIALOG (For Full Images)
+# MODAL DIALOG: INTERACTIVE IMAGE VIEWER
 # =============================================================================
-@st.dialog("Original Engineering Drawing", width="large")
-def show_full_drawing(image_path: Path):
-    """Pops up a full-screen overlay to view the original macro image."""
+@st.dialog("Interactive Drawing Viewer", width="large")
+def show_full_drawing(image_path: Path, scan_id: str):
+    """Renders a high-fidelity image viewer with native Plotly pan/zoom integration."""
     if image_path.exists():
-        st.image(Image.open(image_path), use_container_width=True)
-    else:
-        st.error(f"Original image not found at path:\n`{image_path}`\n\nEnsure the pipeline is saving to `1_preprocess`.")
+        state_key = f"rot_{scan_id}"
+        if state_key not in st.session_state:
+            st.session_state[state_key] = 0
 
+        col_ccw, col_cw, col_help = st.columns([2, 2, 6])
+        if col_ccw.button("↺ Rotate CCW", key=f"ccw_{scan_id}"):
+            st.session_state[state_key] += 90
+            st.rerun()
+        if col_cw.button("↻ Rotate CW", key=f"cw_{scan_id}"):
+            st.session_state[state_key] -= 90
+            st.rerun()
+            
+        with col_help:
+            st.info("🖱️ **Scroll** to Zoom | **Click & Drag** to Pan")
+
+        img = Image.open(image_path)
+        if st.session_state[state_key] % 360 != 0:
+            img = img.rotate(st.session_state[state_key], expand=True)
+
+        fig = px.imshow(img)
+        fig.update_layout(
+            coloraxis_showscale=False,
+            margin=dict(l=0, r=0, t=0, b=0),
+            xaxis=dict(showticklabels=False, showgrid=False, zeroline=False, visible=False),
+            yaxis=dict(showticklabels=False, showgrid=False, zeroline=False, visible=False),
+            hovermode=False,
+            dragmode="pan"
+        )
+        
+        st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': True})
+    else:
+        st.error(f"Image not found at path:\n`{image_path}`")
 
 # =============================================================================
 # DASHBOARD UI
 # =============================================================================
 def main():
-    st.title("📊 OCR Pipeline Command Center")
+    st.title("📊 OCR Production Command Center")
     
-    tab_analytics, tab_review = st.tabs([
-        "📈 Historical Analytics", 
-        "🛠️ Manual Review (Latest Run)"
+    # --- Sync historical data on startup so 100% automated batches appear ---
+    sync_historical_metrics()
+    
+    if not HOLDING_ZONE_DIR.exists():
+        HOLDING_ZONE_DIR.mkdir(parents=True, exist_ok=True)
+    pending_files = list(HOLDING_ZONE_DIR.glob("*.*"))
+    pending_count = len(pending_files)
+    
+    tab_review, tab_analytics = st.tabs([
+        f"🛠️ Action Queue ({pending_count})", 
+        "📈 Historical Analytics"
     ])
     
     # =========================================================================
-    # TAB 1: HISTORICAL ANALYTICS
-    # =========================================================================
-    with tab_analytics:
-        df = load_historical_data()
-        
-        if df.empty:
-            st.info(f"Waiting for data... Run your OCR pipeline to populate `{DASHBOARD_DIR.name}`.")
-            return
-
-        st.markdown("### Pipeline Health (All Time)")
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        
-        avg_acc = df["Accuracy (%)"].mean()
-        total_scans = df["Total Processed"].sum()
-        total_err = df["Total Errors"].sum()
-        avg_conf = df["Mean Confidence"].mean()
-        
-        kpi1.metric("Average Accuracy", f"{avg_acc:.1f}%")
-        kpi2.metric("Total Scans", f"{total_scans:,}")
-        kpi3.metric("Total Errors Caught", f"{total_err:,}")
-        kpi4.metric("Avg System Confidence", f"{avg_conf:.1f}%")
-        
-        st.divider()
-
-        col_chart1, col_chart2 = st.columns(2)
-        with col_chart1:
-            st.markdown("#### 📈 Accuracy Over Time")
-            fig_acc = px.line(
-                df, x="Timestamp", y="Accuracy (%)", markers=True,
-                hover_data=["Batch ID", "Total Processed"],
-                color_discrete_sequence=["#2E86C1"]
-            )
-            fig_acc.update_layout(yaxis_range=[0, 105], margin=dict(l=0, r=0, t=30, b=0))
-            st.plotly_chart(fig_acc, use_container_width=True)
-
-        with col_chart2:
-            st.markdown("#### ⚠️ Error Breakdown Over Time")
-            fig_err = px.bar(
-                df, x="Timestamp", y=["Verification Errors", "Extraction Failures"],
-                hover_data=["Batch ID"],
-                color_discrete_sequence=["#E74C3C", "#F39C12"],
-                barmode="stack"
-            )
-            fig_err.update_layout(margin=dict(l=0, r=0, t=30, b=0), legend_title_text="Error Type")
-            st.plotly_chart(fig_err, use_container_width=True)
-
-    # =========================================================================
-    # TAB 2: MANUAL REVIEW (LATEST RUN)
+    # TAB 1: PRODUCTION ACTION QUEUE (Single-Piece Flow)
     # =========================================================================
     with tab_review:
-        latest_data = load_latest_run_details()
-        
-        if not latest_data:
-            st.info("No recent run data found for manual review.")
-            return
+        if pending_count == 0:
+            st.success("🎉 Inbox Zero! No files pending human verification.")
+            st.balloons()
+            st.markdown("""
+            **Next Steps:**
+            * **📊 View Analytics:** Click the **Historical Analytics** tab to see your Shadow Metrics.
+            * **📁 Access Your Scans:** Your processed drawings are in `00-output/success/`.
+            * **🛑 Close the Dashboard:** Press **`Ctrl + C`** in your terminal.
+            """)
+        else:
+            st.warning(f"**Action Required:** You have {pending_count} files to verify.")
             
-        batch_id = latest_data.get("batch_info", {}).get("batch_id", "Unknown")
-        st.markdown(f"### Action Items for Batch: `{batch_id}`")
-        
-        # ---------------------------------------------------------------------
-        # 1. COMPLETE EXTRACTION FAILURES
-        # ---------------------------------------------------------------------
-        extraction_failures = latest_data.get("extraction_failures", [])
-        if extraction_failures:
-            st.error(f"🚨 **Critical: {len(extraction_failures)} Extraction Failures** (YOLO/OCR totally missed)")
+            # Use the new mapping function to track which file belongs to which batch
+            guesses = get_all_pending_guesses()
             
-            for failure in extraction_failures:
-                scan_id = failure["filename"]
-                reason = failure.get("reason", "Unknown")
-                macro_path = DEBUG_FOLDERS["preprocessed"] / f"{scan_id}_ready.jpg"
+            # Iterate through queue, presenting one distinct commit button per row
+            for file_path in pending_files:
+                filename = file_path.name
+                scan_id = file_path.stem.split('_')[0]
+                
+                file_info = guesses.get(filename, {})
+                system_guess = str(file_info.get("corrected_job") or file_info.get("raw_job") or "").strip()
+                conf = float(file_info.get("confidence", 0.0))
+                method_used = file_info.get("method", "unknown")
+                origin_batch_id = file_info.get("batch_id", "Unknown")
                 
                 with st.container(border=True):
-                    col_thumb, col_info, col_btn = st.columns([1, 3, 1])
+                    col_img, col_info, col_input, col_btn = st.columns([1.5, 2, 2, 1])
                     
-                    with col_thumb:
-                        if macro_path.exists():
-                            st.image(Image.open(macro_path), width=100)
-                        else:
-                            st.write("🖼️ *No Image*")
-                            
-                    with col_info:
-                        st.write(f"**Scan ID:** `{scan_id}`")
-                        st.caption(f"Reason: {reason}")
-                        
-                    with col_btn:
-                        st.write("") 
-                        if st.button("🔍 View Full Size", key=f"btn_ext_{scan_id}"):
-                            show_full_drawing(macro_path)
-        else:
-            st.success("✅ Zero extraction failures in this run.")
-
-        st.markdown("---")
-
-        # ---------------------------------------------------------------------
-        # 2. VERIFICATION MISMATCHES (With Macro Fallback)
-        # ---------------------------------------------------------------------
-        failed_files = latest_data.get("failed_files", [])
-        if failed_files:
-            st.warning(f"⚠️ **Review Required: {len(failed_files)} Verification Mismatches** (OCR Typo/Error)")
-            
-            cols = st.columns(3)
-            
-            for idx, mismatch in enumerate(failed_files):
-                scan_id = mismatch["filename"]
-                expected = mismatch["expected"]
-                actual = mismatch["actual"]
-                
-                with cols[idx % 3]:
-                    with st.container(border=True):
-                        st.markdown(f"#### 📄 `{scan_id}`")
-                        st.write(f"**Expected GT:** `{expected}`")
-                        st.write(f"**OCR Guessed:** :red[`{actual}`]")
-                        
+                    with col_img:
                         micro_folder = DEBUG_FOLDERS["micro_vision"]
                         possible_crops = list(micro_folder.glob(f"*{scan_id}_micro_*.jpg"))
                         
                         if possible_crops:
-                            try:
-                                st.image(Image.open(possible_crops[-1]), use_container_width=True)
-                            except Exception:
-                                st.error("Image corrupted")
+                            st.image(Image.open(possible_crops[-1]), width='stretch')
                         else:
-                            # ---> THE FIX: Fallback to Macro Vision Image <---
-                            st.warning("Micro-crop missing. Falling back to original drawing:")
                             macro_path = DEBUG_FOLDERS["preprocessed"] / f"{scan_id}_ready.jpg"
-                            
                             if macro_path.exists():
-                                st.image(Image.open(macro_path), use_container_width=True)
-                                if st.button("🔍 View Full Size", key=f"btn_mismatch_{scan_id}"):
-                                    show_full_drawing(macro_path)
+                                st.image(Image.open(macro_path), width='stretch')
+                                if st.button("🔍 View Interactive", key=f"btn_macro_{scan_id}"):
+                                    show_full_drawing(macro_path, scan_id)
                             else:
-                                st.error("🖼️ Original drawing not found in `1_preprocess`.")
+                                st.write("🖼️ *No Image*")
+                            
+                    with col_info:
+                        st.markdown(f"#### `{scan_id}`")
+                        if system_guess and system_guess != "failed":
+                            st.write(f"**System Guess:** `{system_guess}`")
+                            st.caption(f"Confidence: {conf:.2f} | Method: {method_used}")
+                        else:
+                            st.error("🚨 Extraction Failure (No Guess)")
+                            
+                    with col_input:
+                        st.write("") 
+                        default_val = system_guess if (system_guess and system_guess != "failed") else ""
+                        
+                        current_input_val = st.text_input(
+                            "Confirm / Edit Job Number:", 
+                            value=default_val, 
+                            key=f"input_{filename}"
+                        )
+                        
+                    with col_btn:
+                        st.write("")
+                        st.write("")
+                        
+                        # --- THE COMMIT ACTION ---
+                        if st.button("💾 Commit", key=f"btn_commit_{filename}", use_container_width=True):
+                            final_job = current_input_val.strip()
+                            
+                            if not final_job:
+                                st.error("Cannot commit empty job number.")
+                                continue
+                                
+                            TRAINING_DATA_DIR.mkdir(parents=True, exist_ok=True)
+                            
+                            # Active Learning Harvesting & Severity Tracking
+                            if system_guess != final_job:
+                                try:
+                                    shutil.copy2(str(file_path), str(TRAINING_DATA_DIR / filename))
+                                    if possible_crops:
+                                        shutil.copy2(str(possible_crops[-1]), str(TRAINING_DATA_DIR / possible_crops[-1].name))
+                                        
+                                    # Calculate Typo Severity
+                                    similarity = SequenceMatcher(None, system_guess, final_job).ratio()
+                                        
+                                    meta_path = TRAINING_DATA_DIR / f"{file_path.stem}_meta.json"
+                                    with open(meta_path, 'w', encoding='utf-8') as f:
+                                        json.dump({
+                                            "filename": filename,
+                                            "system_guess": system_guess,
+                                            "human_correction_ground_truth": final_job,
+                                            "similarity_score": similarity,
+                                            "confidence": conf,
+                                            "method_used": method_used,
+                                            "harvested_at": datetime.now().isoformat()
+                                        }, f, indent=2)
+                                except Exception as e:
+                                    st.warning(f"Failed to harvest training data: {e}")
+                            
+                            # Physical File Routing
+                            safe_job = "".join([c for c in final_job if c.isalnum() or c in "-_"]).strip()
+                            final_dir = OUTPUT_DIR / "success" / safe_job
+                            final_dir.mkdir(parents=True, exist_ok=True)
+                            
+                            try:
+                                shutil.move(str(file_path), str(final_dir / filename))
+                            except Exception as e:
+                                st.error(f"Failed to move file: {e}")
+                                continue
+                                
+                            # Rebuild UI and Data Lake instantly for the specific batch
+                            update_batch_metrics_stateless(origin_batch_id)
+                            
+                            # Cache Invalidation Fix
+                            load_historical_data.clear() 
+                            load_method_stats.clear()
+                            
+                            st.rerun()
+
+    # =========================================================================
+    # TAB 2: HISTORICAL ANALYTICS
+    # =========================================================================
+    with tab_analytics:
+        df = load_historical_data()
+        if df.empty:
+            st.info("Waiting for historical data... Complete a batch to generate metrics.")
         else:
-            st.success("✅ Zero verification mismatches in this run.")
+            st.markdown("### 🏆 Pipeline Efficiency (All Time)")
+            
+            # --- GLOBAL MATH FIX (Strict Accuracy Computation) ---
+            total_processed_all_time = df['Total Processed'].sum()
+            total_verified_all_time = df['Verified Processed'].sum()
+            total_typos_all_time = df['Actual Typos Fixed'].sum()
+            
+            total_accurate_all_time = total_verified_all_time - total_typos_all_time
+            global_accuracy = (total_accurate_all_time / total_verified_all_time * 100) if total_verified_all_time > 0 else 0.0
+            
+            total_theo_auto = df['Theoretical Auto Count'].sum()
+            global_theo_auto = (total_theo_auto / total_processed_all_time * 100) if total_processed_all_time > 0 else 0.0
+            
+            total_silent_failures = df['Silent Failures'].sum()
+            total_verified_trusted_all_time = df['Verified Trusted'].sum()
+            
+            # Strict Global Silent Failure Rate
+            global_silent_rate = (total_silent_failures / total_verified_trusted_all_time * 100) if total_verified_trusted_all_time > 0 else 0.0
+            
+            # --- ROW 1: QUALITY & RISK METRICS ---
+            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+            kpi1.metric(f"Theoretical Automation (at {SHADOW_THRESHOLD*100:.0f}%)", f"{global_theo_auto:.1f}%")
+            kpi2.metric("Actual OCR Accuracy", f"{global_accuracy:.1f}%")
+            
+            kpi3.markdown(f"**🚨 Silent Failure Risk**<br><h2 style='color: #E74C3C; margin:0;'>{global_silent_rate:.1f}%</h2>", unsafe_allow_html=True)
+            kpi4.metric("Avg System Confidence", f"{df['Mean Confidence'].mean():.1f}%")
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            # --- ROW 2: VOLUME & HARDWARE SPEED METRICS ---
+            v_kpi1, v_kpi2, v_kpi3, v_kpi4 = st.columns(4)
+            v_kpi1.metric("Total Scans Processed", f"{total_processed_all_time:,}")
+            v_kpi2.metric("Total Typos Fixed", f"{total_typos_all_time:,}")
+            
+            # Isolated Machine Speed Data (Filtering out legacy 0.0s runs)
+            df_valid_speed = df[df['Last Batch OCR Time (s)'] > 0]
+            last_run_time = df_valid_speed['Last Batch OCR Time (s)'].iloc[-1] if not df_valid_speed.empty else 0.0
+            
+            # Global Average Speed (Volume Weighted)
+            total_time_valid = df_valid_speed['Last Batch OCR Time (s)'].sum()
+            total_processed_valid = df_valid_speed['Total Processed'].sum()
+            global_avg_speed = (total_time_valid / total_processed_valid) if total_processed_valid > 0 else 0.0
+            
+            v_kpi3.metric("Last Batch OCR Time", f"{last_run_time:.1f}s", help="Total processing time for the Python Orchestrator script.")
+            v_kpi4.metric("Avg Speed (Sec / Scan)", f"{global_avg_speed:.1f}s")
+            
+            st.divider()
+            
+            # =================================================================
+            # CATEGORICAL LINE CHARTS (Eliminates Time Gaps)
+            # =================================================================
+            col_chart1, col_chart2 = st.columns(2)
+            
+            with col_chart1:
+                st.markdown("#### 📈 Theoretical Automation vs. Actual Accuracy")
+                fig_rates = px.line(
+                    df, x="Run Label", y=["Theoretical Automation (%)", "Actual OCR Accuracy (%)", "Silent Failure Rate (%)"], 
+                    markers=True,
+                    color_discrete_sequence=["#8E44AD", "#27AE60", "#E74C3C"], 
+                    labels={"value": "Percentage (%)", "variable": "Metric"}
+                )
+                # Force Plotly to treat the X-axis as distinct categories, not a timeline
+                fig_rates.update_xaxes(type='category')
+                fig_rates.update_layout(yaxis_range=[0, 105], margin=dict(l=0, r=0, t=30, b=0), legend_title=None)
+                st.plotly_chart(fig_rates, use_container_width=True)
+                
+            with col_chart2:
+                st.markdown("#### ⚡ Hardware Processing Speed (Sec / Scan)")
+                fig_speed = px.line(df, x="Run Label", y="Speed (Sec / Scan)", markers=True, color_discrete_sequence=["#3498DB"])
+                fig_speed.update_xaxes(type='category')
+                fig_speed.update_layout(margin=dict(l=0, r=0, t=30, b=0))
+                st.plotly_chart(fig_speed, use_container_width=True)
+
+            # =================================================================
+            # DIAGNOSTICS: SEVERITY & METHOD BREAKDOWN
+            # =================================================================
+            st.divider()
+            col_diag1, col_diag2 = st.columns([1, 2])
+            
+            with col_diag1:
+                st.markdown("#### ⚠️ Typo Severity Analysis")
+                st.info("Measures how drastically the human had to alter the system's guess.")
+                
+                # Fix Typo Severity Math (Only count batches where typos actually occurred)
+                df_with_typos = df[df['Actual Typos Fixed'] > 0]
+                if not df_with_typos.empty:
+                    avg_sim = (df_with_typos['Avg Typo Similarity (%)'] * df_with_typos['Actual Typos Fixed']).sum() / df_with_typos['Actual Typos Fixed'].sum()
+                else:
+                    avg_sim = 100.0  # Perfect system
+                
+                # 3-Tier Dynamic Coloring and Messaging for Typo Severity
+                if avg_sim >= 90.0:
+                    sim_color = "#27AE60"  # Green
+                    sim_icon = "✅"
+                    sim_title = "High Similarity"
+                    sim_desc = "Errors are minor optical confusions (e.g., 'O' vs '0')."
+                elif avg_sim >= 80.0:
+                    sim_color = "#F39C12"  # Orange
+                    sim_icon = "⚠️"
+                    sim_title = "Moderate Similarity"
+                    sim_desc = "Partial captures. The AI is likely dropping suffixes or prefixes."
+                else:
+                    sim_color = "#E74C3C"  # Red
+                    sim_icon = "🚨"
+                    sim_title = "Low Similarity"
+                    sim_desc = "The AI is heavily hallucinating answers or reading the wrong text block."
+                
+                # Render the UI
+                st.markdown(f"<h1 style='color: {sim_color}; font-size: 3rem;'>{avg_sim:.1f}%</h1>", unsafe_allow_html=True)
+                st.caption(f"{sim_icon} **{sim_title}:** {sim_desc}")
+
+            with col_diag2:
+                st.markdown("#### 🎯 Accuracy by Extraction Method (Lifetime)")
+                df_methods = load_method_stats()
+                
+                if not df_methods.empty:
+                    fig_methods = px.bar(
+                        df_methods, 
+                        x="Accuracy (%)", 
+                        y="Method", 
+                        orientation='h',
+                        text="Accuracy (%)",
+                        color="Accuracy (%)",
+                        color_continuous_scale=["#E74C3C", "#F39C12", "#27AE60"], 
+                        range_color=[0, 100],
+                        hover_data={"Total Processed": True}
+                    )
+                    fig_methods.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                    fig_methods.update_layout(
+                        xaxis_range=[0, 115], 
+                        margin=dict(l=0, r=0, t=10, b=0), 
+                        coloraxis_showscale=False
+                    )
+                    st.plotly_chart(fig_methods, use_container_width=True)
+                else:
+                    st.info("No method extraction data available yet. Commit files to generate.")
 
 if __name__ == "__main__":
     main()
