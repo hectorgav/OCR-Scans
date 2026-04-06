@@ -184,9 +184,12 @@ def extract_job_number(
     # ✅ Enhance image before HSV extraction
     enhanced_image = enhancer.enhance(oriented_image, method="hsv")
     hsv_result = extract_blue_stamp(enhanced_image, ocr_engine)
+    
     if hsv_result:
-        hsv_job, hsv_conf = hsv_result
-        viz.save_ocr_debug(debug_stem, "hsv_sniper_enhanced", hsv_job, hsv_conf, roi_img=enhanced_image)
+        # Unpack the 3 variables and pass it to viz
+        hsv_job, hsv_conf, hsv_crop = hsv_result
+        viz.save_ocr_debug(debug_stem, "hsv_sniper_enhanced", hsv_job, hsv_conf, roi_img=hsv_crop)
+        
         return hsv_job, hsv_conf, "hsv_stamp_sniper_enhanced", {}
 
     # -------------------------------------------------------------------------

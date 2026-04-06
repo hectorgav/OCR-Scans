@@ -49,12 +49,12 @@ def _crop_padded(image: np.ndarray, box: Tuple[int, int, int, int]) -> np.ndarra
     y2 = min(img_h, y + h + CROP_PAD_PX)
     return image[y1:y2, x1:x2]
 
-def extract_blue_stamp(image: np.ndarray, ocr_engine) -> Optional[Tuple[str, float]]:
+def extract_blue_stamp(image: np.ndarray, ocr_engine) -> Optional[Tuple[str, float, np.ndarray]]:
     """
     Locates blue/green stamps and extracts text using the unified PaddleOCR engine.
-    Returns the validated Job Number and its True OCR Confidence.
+    Returns the validated Job Number, its OCR Confidence, and the exact cropped ROI image.
     
-    FIX: Preserves structurally valid extractions even if year validation fails.
+    FIX: Preserves structurally valid extractions and passes the ROI back to the dashboard.
     """
     if image is None or image.size == 0:
         return None
@@ -69,6 +69,7 @@ def extract_blue_stamp(image: np.ndarray, ocr_engine) -> Optional[Tuple[str, flo
 
         best_text = None
         best_conf = 0.0
+        best_crop = None  # Track the winning image slice
         validator = UnifiedValidator()
 
         for box in boxes:
@@ -76,19 +77,19 @@ def extract_blue_stamp(image: np.ndarray, ocr_engine) -> Optional[Tuple[str, flo
             results = ocr_engine.run_single_pass(crop)
             
             for raw_text, conf in results:
-                # =========================================================
-                # CRITICAL FIX: Use metadata validation to preserve high-conf OCR
-                # =========================================================
+                # Use metadata validation to preserve high-conf OCR
                 result = validator.validate_with_metadata(raw_text, conf)
                 
                 # Keep if: (1) structurally valid format, AND (2) higher confidence
                 if result.normalized and conf > best_conf:
                     best_text = result.normalized
                     best_conf = conf
+                    best_crop = crop.copy()  # <--- NEW: Save the exact image slice
                     logger.debug(f"HSV: Kept '{result.normalized}' (conf={conf:.3f}, valid={result.is_valid}, structural={result.is_structurally_valid})")
 
-        if best_text:
-            return best_text, best_conf
+        # <--- NEW: Return all 3 variables 
+        if best_text and best_crop is not None:
+            return best_text, best_conf, best_crop
 
     except Exception as e:
         logger.error(f"HSV Stamp Extractor failed: {e}")

@@ -47,10 +47,12 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-# 4. Launch Dashboard
+# 4. Launch Dashboard (FIXED)
 Write-Host "`n[2/2] Starting Streamlit Server..."
-$DashboardDir = Join-Path $ProjectRoot "dashboard"
-Set-Location -Path $DashboardDir
-& streamlit run "app.py"
+# Build the absolute path to app.py instead of moving into its directory
+$AppPath = Join-Path $ProjectRoot "dashboard\app.py"
 
-Read-Host "Press Enter to close"
+# Run Streamlit from the root directory by pointing it directly to the app file
+& streamlit run "$AppPath"
+
+# When you press Ctrl+C to stop the server, the terminal will remain in $ProjectRoot
