@@ -397,7 +397,7 @@ def main():
     
     if not HOLDING_ZONE_DIR.exists():
         HOLDING_ZONE_DIR.mkdir(parents=True, exist_ok=True)
-    pending_files = list(HOLDING_ZONE_DIR.glob("*.*"))
+    pending_files = sorted(list(HOLDING_ZONE_DIR.glob("*.*")), key=lambda x: x.name)
     pending_count = len(pending_files)
     
     tab_review, tab_analytics = st.tabs([
