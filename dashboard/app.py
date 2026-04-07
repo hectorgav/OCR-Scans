@@ -33,7 +33,7 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
-from config import DASHBOARD_DIR, DEBUG_FOLDERS, HOLDING_ZONE_DIR, OUTPUT_DIR, TRUST_OCR_THRESHOLD
+from config import DASHBOARD_DIR, DEBUG_FOLDERS, HOLDING_ZONE_DIR, OUTPUT_DIR, TRUST_OCR_THRESHOLD, APP_MODE
 
 TRAINING_DATA_DIR = OUTPUT_DIR / "training_data"
 SHADOW_THRESHOLD = 0.85  # The theoretical threshold used to track potential time-savings
@@ -42,7 +42,7 @@ SHADOW_THRESHOLD = 0.85  # The theoretical threshold used to track potential tim
 # STREAMLIT PAGE CONFIGURATION
 # =============================================================================
 st.set_page_config(
-    page_title="OCR Pipeline Analytics",
+    page_title=f"OCR {APP_MODE.title()} Analytics",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -390,7 +390,8 @@ def show_full_drawing(image_path: Path, scan_id: str):
 # DASHBOARD UI
 # =============================================================================
 def main():
-    st.title("📊 OCR Production Command Center")
+    display_mode = APP_MODE.title()
+    st.title(f"📊 OCR {display_mode} Command Center")
     
     # --- Sync historical data on startup so 100% automated batches appear ---
     sync_historical_metrics()

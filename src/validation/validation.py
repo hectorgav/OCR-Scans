@@ -95,13 +95,17 @@ class UnifiedValidator:
         self.sep_pattern = rf"[{es}–—]+"
         strict_tail = r"(?![0-9A-Za-z])"
         
+        # --- THE FIX (PART 1): STRICT HEAD BOUNDARY ---
+        # Negative lookbehind: Ensures the matched job number is NOT preceded by another digit.
+        # This stops the regex from finding '240319' inside '20240319'.
+        strict_head = r"(?<!\d)" 
+        
         # Compile patterns using year_regex for early rejection of invalid years
-        # This is physics-based: pattern matching models how job numbers appear in documents
         self.pattern_strict = re.compile(
-            rf"({self.year_regex}[\s]*0[\s]*\d[\s]*\d[\s]*\d)(?:[\s]*(?:{self.sep_pattern})?[\s]*(\d{{2}}){strict_tail})"
+            rf"{strict_head}({self.year_regex}[\s]*0[\s]*\d[\s]*\d[\s]*\d)(?:[\s]*(?:{self.sep_pattern})?[\s]*(\d{{2}}){strict_tail})"
         )
         self.pattern_flexible = re.compile(
-            rf"({self.year_regex}[\s]*0[\s]*\d[\s]*\d[\s]*\d)(?:[\s]*(?:{self.sep_pattern})?[\s]*(\d{{2}})?)"
+            rf"{strict_head}({self.year_regex}[\s]*0[\s]*\d[\s]*\d[\s]*\d)(?:[\s]*(?:{self.sep_pattern})?[\s]*(\d{{2}})?)"
         )
         
         # Decapitated pattern: rescues job numbers where first digit is separated
@@ -116,7 +120,6 @@ class UnifiedValidator:
         self.canonical_keep_pattern = re.compile(rf"[^0-9A-Za-z{es}\n]")
         
         # OCR correction map: physics-based character confusion model
-        # Models common OCR errors: O→0, l→1, S→5, etc.
         self.ocr_correction_map = str.maketrans({
             "O":"0","o":"0","U":"0","u":"0","Q":"0",
             "I":"1","l":"1","|":"1","L":"1",
@@ -125,6 +128,7 @@ class UnifiedValidator:
             "~":"-","/":"-","_":"-","=":"-","≡":"-"
         })
         
+        # --- THE FIX (PART 2): TARGETED EXCLUSIONS ---
         # Exclusion patterns: filter common false positives using regex topology
         self.exclusion_patterns = [
             re.compile(p, re.IGNORECASE) for p in [
@@ -136,7 +140,9 @@ class UnifiedValidator:
                 r"\(?\d{3}\)?[-\s.]?\d{3}[-\s.]?\d{4}", 
                 r"\bD[-–—]\d+\b", 
                 r"\bE[-–—]\d+\b", 
-                r"\bS\d{3}[-–—]\d+\b"
+                r"\bS\d{3}[-–—]\d+\b",
+                r"\b20\d{6}\b",             # NEW: Completely blocks 8-digit YYYYMMDD dates (e.g., 20240319)
+                r"\bAPPROVED[\s:]*\d+\b"    # NEW: Blocks the word "APPROVED" followed by any digits
             ]
         ]
 

@@ -13,9 +13,9 @@ from src.validation.validation import UnifiedValidator
 from src.utils.log import get_logger
 logger = get_logger("hsv_stamp_extractor")
 
-LOWER_BLUE = np.array([85, 20, 20], dtype=np.uint8)
+LOWER_BLUE = np.array([85, 45, 20], dtype=np.uint8)
 UPPER_BLUE = np.array([140, 255, 255], dtype=np.uint8)
-LOWER_GREEN = np.array([35, 30, 30], dtype=np.uint8)
+LOWER_GREEN = np.array([35, 45, 30], dtype=np.uint8)
 UPPER_GREEN = np.array([85, 255, 255], dtype=np.uint8)
 # --- ASYMMETRIC PADDING ---
 CROP_PAD_Y_PX = 20      # Tight vertical padding

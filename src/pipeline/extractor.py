@@ -179,18 +179,23 @@ def extract_job_number(
                     return best_jn, best_conf, best_method, {}
 
     # -------------------------------------------------------------------------
-    # PHASE 1.5: MULTI-SPECTRUM HSV SNIPER (with enhancement)
+    # PHASE 1.5: MULTI-SPECTRUM HSV SNIPER (Targeted Region)
     # -------------------------------------------------------------------------
-    # ✅ Enhance image before HSV extraction
-    enhanced_image = enhancer.enhance(oriented_image, method="hsv")
-    hsv_result = extract_blue_stamp(enhanced_image, ocr_engine)
-    
-    if hsv_result:
-        # Unpack the 3 variables and pass it to viz
-        hsv_job, hsv_conf, hsv_crop = hsv_result
-        viz.save_ocr_debug(debug_stem, "hsv_sniper_enhanced", hsv_job, hsv_conf, roi_img=hsv_crop)
+    # THE FIX: Restrict the HSV search space to the Bottom-Right Quadrant
+    # This eliminates false positives from the rest of the page.
+    x_start_hsv = int(w_proc * 0.40)
+    y_start_hsv = int(h_proc * 0.40)
+    br_search_region = oriented_image[y_start_hsv:h_proc, x_start_hsv:w_proc]
+
+    if br_search_region.size > 0:
+        # Enhance only the targeted region
+        enhanced_image = enhancer.enhance(br_search_region, method="hsv")
+        hsv_result = extract_blue_stamp(enhanced_image, ocr_engine)
         
-        return hsv_job, hsv_conf, "hsv_stamp_sniper_enhanced", {}
+        if hsv_result:
+            hsv_job, hsv_conf, hsv_crop = hsv_result
+            viz.save_ocr_debug(debug_stem, "hsv_sniper_enhanced", hsv_job, hsv_conf, roi_img=hsv_crop)
+            return hsv_job, hsv_conf, "hsv_stamp_sniper_enhanced", {}
 
     # -------------------------------------------------------------------------
     # PHASE 2: TARGETED ANCHOR SEARCH (Fallback for massive stamps)
