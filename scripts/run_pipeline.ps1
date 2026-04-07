@@ -1,4 +1,3 @@
-$Host.UI.RawUI.WindowTitle = "OCR Pipeline - PRODUCTION"
 Clear-Host
 
 # --- DIRECTORY RESOLUTION ---
@@ -26,15 +25,36 @@ if (Test-Path $EnvFile) {
     exit
 }
 
-# 2. Get Input Path from .env
+# 2. Dynamically Resolve Environment and Mode
 $WorkEnv = $env:WORK_ENV
-$ProdVar = "${WorkEnv}_INPUT_PROD"
-$TargetInput = (Get-Item "Env:$ProdVar").Value
-$BatchID = "Run_PROD_" + (Get-Date -Format "yyyyMMdd_HHmm")
+$AppMode = $env:APP_MODE
 
-Write-Host "Environment: $WorkEnv"
-Write-Host "Target Input: $TargetInput"
-Write-Host "Batch ID:    $BatchID"
+# Create a clean short mode (DEV vs PROD) to match the .env file
+$ShortMode = if ($AppMode -eq "DEVELOPMENT") { "DEV" } else { "PROD" }
+
+# Update Terminal Window Title dynamically
+$Host.UI.RawUI.WindowTitle = "OCR Pipeline - $AppMode"
+
+# Construct the exact variable name defined in your .env (e.g., OFFICE_INPUT_DEV)
+$InputVarName = "${WorkEnv}_INPUT_${ShortMode}"
+$TargetInput = (Get-Item "Env:$InputVarName" -ErrorAction SilentlyContinue).Value
+
+# Safety check in case the .env is missing the constructed key
+if (-not $TargetInput) {
+    Write-Host "`n[CRITICAL ERROR] Missing configuration in .env" -ForegroundColor Red
+    Write-Host "Could not find a path for: $InputVarName"
+    Read-Host "Press Enter to exit"
+    exit
+}
+
+$BatchID = "Run_${ShortMode}_" + (Get-Date -Format "yyyyMMdd_HHmm")
+
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host " Environment: $WorkEnv"
+Write-Host " Application: $AppMode"
+Write-Host " Target Dir:  $TargetInput"
+Write-Host " Batch ID:    $BatchID"
+Write-Host "========================================" -ForegroundColor Cyan
 
 # 3. Execute Pipeline
 Write-Host "`n[1/2] Running main.py orchestrator..."
@@ -47,12 +67,10 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-# 4. Launch Dashboard (FIXED)
+# 4. Launch Dashboard
 Write-Host "`n[2/2] Starting Streamlit Server..."
 # Build the absolute path to app.py instead of moving into its directory
 $AppPath = Join-Path $ProjectRoot "dashboard\app.py"
 
 # Run Streamlit from the root directory by pointing it directly to the app file
 & streamlit run "$AppPath"
-
-# When you press Ctrl+C to stop the server, the terminal will remain in $ProjectRoot

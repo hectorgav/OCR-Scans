@@ -41,18 +41,15 @@ output_key = f"{WORK_ENV}_OUTPUT_DEV" if APP_MODE == "DEVELOPMENT" else f"{WORK_
 
 try:
     INPUT_DIR = Path(os.getenv(input_key))
-    # We pull the root output directory from .env
-    RAW_OUTPUT_ROOT = Path(os.getenv(output_key))
+    OUTPUT_DIR = Path(os.getenv(output_key))  # <--- We grab it directly here!
 except TypeError:
     raise ValueError(f"CRITICAL: Missing configuration in .env for {input_key} or {output_key}")
 
 # --- SMART PATH REDIRECTION ---
 if APP_MODE == "DEVELOPMENT":
-    OUTPUT_DIR = RAW_OUTPUT_ROOT / "00-output-dev"
     LOG_LEVEL = "DEBUG"
     VERBOSE_OUTPUT = True
 else:
-    OUTPUT_DIR = RAW_OUTPUT_ROOT / "00-output-prod"
     LOG_LEVEL = "INFO"
     VERBOSE_OUTPUT = False  # Keep the console cleaner in prod
 

@@ -17,7 +17,9 @@ LOWER_BLUE = np.array([85, 20, 20], dtype=np.uint8)
 UPPER_BLUE = np.array([140, 255, 255], dtype=np.uint8)
 LOWER_GREEN = np.array([35, 30, 30], dtype=np.uint8)
 UPPER_GREEN = np.array([85, 255, 255], dtype=np.uint8)
-CROP_PAD_PX = 15
+# --- ASYMMETRIC PADDING ---
+CROP_PAD_Y_PX = 20   # Keep vertical padding tight
+CROP_PAD_X_PX = 150  # Massive horizontal dragnet to catch distant suffixes
 
 def _build_multi_spectrum_mask(image: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -43,10 +45,13 @@ def _find_stamp_boxes(mask: np.ndarray, img_shape: Tuple[int, int, int]) -> List
 def _crop_padded(image: np.ndarray, box: Tuple[int, int, int, int]) -> np.ndarray:
     x, y, w, h = box
     img_h, img_w = image.shape[:2]
-    x1 = max(0, x - CROP_PAD_PX)
-    y1 = max(0, y - CROP_PAD_PX)
-    x2 = min(img_w, x + w + CROP_PAD_PX)
-    y2 = min(img_h, y + h + CROP_PAD_PX)
+    
+    # Apply asymmetric padding to swallow distant suffixes
+    x1 = max(0, x - CROP_PAD_X_PX)
+    y1 = max(0, y - CROP_PAD_Y_PX)
+    x2 = min(img_w, x + w + CROP_PAD_X_PX)
+    y2 = min(img_h, y + h + CROP_PAD_Y_PX)
+    
     return image[y1:y2, x1:x2]
 
 def extract_blue_stamp(image: np.ndarray, ocr_engine) -> Optional[Tuple[str, float, np.ndarray]]:
