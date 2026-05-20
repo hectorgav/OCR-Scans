@@ -124,7 +124,7 @@ MIN_ROTATION_ANGLE_DETECTION = 5
 # --- YOLO DETECTION ---
 # ============================================================================
 
-YOLO_MODEL_PATH = PROJECT_ROOT / "models" / "jobnum_detection_V2.pt"
+YOLO_MODEL_PATH = PROJECT_ROOT / "models" / "jobnum_detection_V2.pt" # models\V002_rect_red_ink.pt
 YOLO_ENABLED = True
 YOLO_CONF_DETECTION = 0.12   
 ENABLE_DEBUG_VIZ = True      
