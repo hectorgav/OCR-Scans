@@ -124,7 +124,7 @@ MIN_ROTATION_ANGLE_DETECTION = 5
 # --- YOLO DETECTION ---
 # ============================================================================
 
-YOLO_MODEL_PATH = PROJECT_ROOT / "models" / "jobnum_detection_V2.pt" # models\V002_rect_red_ink.pt
+YOLO_MODEL_PATH = PROJECT_ROOT / "models" / "V002_rect_red_ink.pt" # models\V002_rect_red_ink.pt
 YOLO_ENABLED = True
 YOLO_CONF_DETECTION = 0.12   
 ENABLE_DEBUG_VIZ = True      
@@ -177,3 +177,21 @@ ENABLE_MULTI_ROTATION_OCR = True
 
 # Parallel workers for batch processing. 
 MAX_WORKERS = 4
+
+# ============================================================================
+# --- CALIBRATED CONFIDENCE FUSION & THRESHOLDS ---
+# ============================================================================
+
+# Weighted distribution for final confidence calculation (Must sum to 1.0)
+YOLO_WEIGHT = 0.35             # Box location confidence weight
+OCR_WEIGHT = 0.65              # Character recognition confidence weight
+
+# Reward boost applied when a specialized color track successfully extracts text
+COLOR_BOOST_WEIGHT = 0.10      # Safe, calibrated boost (Capped at 1.0)
+
+# Validation Thresholds
+OCR_CONFIDENCE_THRESHOLD = 0.70    # Minimum confidence to accept an individual OCR read
+FINAL_CONFIDENCE_THRESHOLD = 0.85  # Fused confidence required to bypass human review
+
+# Target validation pattern (######-##)
+JOB_NUMBER_REGEX_PATTERN = r"^\d{6}-\d{2}$"

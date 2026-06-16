@@ -1,7 +1,7 @@
 # =============================================================================
 # src/pipeline/smart_filing.py
 # =============================================================================
-# SMART FILING ENGINE - Tiered Correction System
+# SMART FILING ENGINE - Tiered Correction System (HITL & Red Ink Enabled)
 # =============================================================================
 
 from dataclasses import dataclass, field
@@ -105,7 +105,78 @@ def _debug_log(msg: str, record: Optional[Record] = None) -> None:
 
 
 # =============================================================================
-# TIER 1: SANDWICH RULE (UPDATED)
+# TIER 0: RED INK CORRECTION
+# =============================================================================
+
+def _apply_red_ink_corrections(records: List[Record], known_jobs: Set[str]) -> None:
+    """
+    Tier 0: Resolves handwritten red ink corrections.
+    Uses regex to clean double-suffixes and matches single-character mutations
+    against known good jobs using the red correction digit.
+    """
+    for r in records:
+        meta = r.meta or {}
+        if not meta.get("has_red_correction"):
+            continue
+            
+        raw_text = r.raw_job
+        if not raw_text:
+            continue
+            
+        _debug_log(f"Tier 0 triggered. Checking red ink correction on: {raw_text}", r)
+        
+        # --- SCENARIO A: Suffix Override (e.g., 240298-145 -> 240298-15) ---
+        suffix_override_match = re.match(r"(\d{6})-(\d)(\d)(\d)", raw_text)
+        if suffix_override_match:
+            prefix, first_suffix, crossed_out, correction = suffix_override_match.groups()
+            corrected = f"{prefix}-{first_suffix}{correction}"
+            if is_valid_format(corrected):
+                r.corrected_job = corrected
+                r.reason = f"Tier 0: Red Ink Suffix Override ({raw_text} -> {corrected})"
+                logger.info(f"✅ Red Ink Suffix Override: {r.filename} | {raw_text} -> {corrected}")
+                continue
+
+        # --- SCENARIO B: Isolated Digit Correction (e.g., '250355-32 3') ---
+        isolated_digit_match = re.search(r"(\d{6}-\d{2})\s*(\d)$", raw_text)
+        if isolated_digit_match:
+            main_job, correction_digit = isolated_digit_match.groups()
+            prefix, suffix = main_job.split("-")
+            
+            # Match against known good jobs to find the correct swap index
+            for pos in range(len(prefix)):
+                temp_prefix = list(prefix)
+                temp_prefix[pos] = correction_digit
+                test_job = f"{''.join(temp_prefix)}-{suffix}"
+                if test_job in known_jobs:
+                    r.corrected_job = test_job
+                    r.reason = f"Tier 0: Red Ink Positional Swap via Known Jobs ({raw_text} -> {test_job})"
+                    logger.info(f"✅ Red Ink Swap: {r.filename} | {raw_text} -> {test_job}")
+                    break
+            if r.corrected_job:
+                continue
+        
+        # --- SCENARIO C: Canceled Stamp with Overwritten Number (e.g., scan360) ---
+        # PaddleOCR will return the handwritten number and the stamped number.
+        # If we have a red correction flag and the OCR output contains multiple candidates:
+        candidates = r.candidates or []
+        if len(candidates) >= 2:
+            # Sort candidates by their vertical position (y-coordinate) or confidence
+            # In these scans, the corrected number is ALWAYS written ABOVE (smaller y-value) the stamp.
+            # Or, we prioritize the valid format that does NOT match the old stamp.
+            valid_options = [c["text"] for c in candidates if is_valid_format(c["text"])]
+            
+            if len(valid_options) >= 2:
+                # The top-most valid option is our handwritten correction!
+                # Let's say valid_options[0] is '240283-16' (red) and [1] is '240292-20' (blue)
+                corrected = valid_options[0] 
+                r.corrected_job = corrected
+                r.reason = f"Tier 0: Red Ink Overwrite Resolved ({raw_text} -> {corrected})"
+                logger.info(f"✅ Resolved Overwritten Stamp: {r.filename} | {raw_text} -> {corrected}")
+                continue        
+
+
+# =============================================================================
+# TIER 1: SANDWICH RULE
 # =============================================================================
 
 def _apply_sandwich_rule(records: List[Record], known_jobs: Set[str]) -> None:
@@ -276,7 +347,8 @@ def smart_correct_batch(records: List[Record], known_jobs: Optional[Iterable[str
     for r in records: 
         r.corrected_job = r.raw_job if r.raw_job not in FAILED_JOB_MARKERS else None
 
-    # Apply correction tiers in order
+    # Apply correction tiers in order (Tier 0 added to handle Red Corrections first)
+    _apply_red_ink_corrections(records, known_jobs_set)
     _apply_sandwich_rule(records, known_jobs_set)
     _apply_suffix_inheritance(records, known_jobs_set)
     _apply_weighted_consensus(records, window, max_dist, known_jobs_set)
@@ -289,3 +361,7 @@ def smart_correct_batch(records: List[Record], known_jobs: Optional[Iterable[str
             r.reason = "kept: valid"
     
     return records
+
+# =============================================================================
+# END OF FILE
+# =============================================================================

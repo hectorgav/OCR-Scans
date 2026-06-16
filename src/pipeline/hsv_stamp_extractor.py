@@ -60,7 +60,7 @@ def extract_blue_stamp(image: np.ndarray, ocr_engine) -> Optional[Tuple[str, flo
     Locates blue/green stamps and extracts text using the unified PaddleOCR engine.
     Returns the validated Job Number, its OCR Confidence, and the exact cropped ROI image.
     
-    FIX: Preserves structurally valid extractions and passes the ROI back to the dashboard.
+    FIX: Uses 'is_acceptable' to enforce confidence-aware override logic.
     """
     if image is None or image.size == 0:
         return None
@@ -75,7 +75,7 @@ def extract_blue_stamp(image: np.ndarray, ocr_engine) -> Optional[Tuple[str, flo
 
         best_text = None
         best_conf = 0.0
-        best_crop = None  # Track the winning image slice
+        best_crop = None  
         validator = UnifiedValidator()
 
         for box in boxes:
@@ -86,14 +86,16 @@ def extract_blue_stamp(image: np.ndarray, ocr_engine) -> Optional[Tuple[str, flo
                 # Use metadata validation to preserve high-conf OCR
                 result = validator.validate_with_metadata(raw_text, conf)
                 
+                # ✅ FIX: Enforce the acceptable override check!
+                is_acceptable = result.is_valid or (result.is_structurally_valid and conf >= 0.70)
+                
                 # Keep if: (1) structurally valid format, AND (2) higher confidence
-                if result.normalized and conf > best_conf:
+                if is_acceptable and conf > best_conf:
                     best_text = result.normalized
                     best_conf = conf
-                    best_crop = crop.copy()  # <--- NEW: Save the exact image slice
+                    best_crop = crop.copy()  
                     logger.debug(f"HSV: Kept '{result.normalized}' (conf={conf:.3f}, valid={result.is_valid}, structural={result.is_structurally_valid})")
 
-        # <--- NEW: Return all 3 variables 
         if best_text and best_crop is not None:
             return best_text, best_conf, best_crop
 
@@ -101,3 +103,7 @@ def extract_blue_stamp(image: np.ndarray, ocr_engine) -> Optional[Tuple[str, flo
         logger.error(f"HSV Stamp Extractor failed: {e}")
 
     return None
+
+# =============================================================================
+# END OF FILE
+# =============================================================================

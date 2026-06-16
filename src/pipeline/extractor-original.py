@@ -19,10 +19,7 @@ import cv2
 from config import (
     YOLO_MODEL_PATH, YOLO_ENABLED, TITLE_BLOCK_ENABLED, ENABLE_DEBUG_VIZ,
     YOLO_CONF_DETECTION, TITLE_BLOCK_X_START, TITLE_BLOCK_Y_START, 
-    TITLE_BLOCK_WIDTH, TITLE_BLOCK_HEIGHT,
-    # Calibrated weights
-    OCR_CONFIDENCE_THRESHOLD, FINAL_CONFIDENCE_THRESHOLD,
-    JOB_NUMBER_REGEX_PATTERN, COLOR_BOOST_WEIGHT, YOLO_WEIGHT, OCR_WEIGHT
+    TITLE_BLOCK_WIDTH, TITLE_BLOCK_HEIGHT
 )
 
 # --- PIPELINE IMPORTS ---
@@ -84,29 +81,6 @@ def get_ocr_engine():
         except Exception as e:
             logger.error(f"❌ Failed to load OcrEngine: {e}")
     return _OCR_ENGINE
-
-def _compute_final_confidence(
-    yolo_conf: float, 
-    ocr_conf: float, 
-    method: str,
-    has_color_enhancement: bool = False
-) -> float:
-    """
-    Computes fused confidence using calibrated, config-driven weights.
-    Bypasses hardcoded rules.
-    """
-    # 1. Run weighted fusion using config ratios (0.35 YOLO + 0.65 OCR)
-    base_conf = weighted_confidence_fusion(
-        yolo_conf, ocr_conf, 
-        yolo_weight=YOLO_WEIGHT, 
-        ocr_weight=OCR_WEIGHT
-    )
-    
-    # 2. Safely apply color boost if a specialized color tracker was used
-    if has_color_enhancement and "color" in method.lower():
-        base_conf = min(1.0, base_conf + COLOR_BOOST_WEIGHT)
-    
-    return round(base_conf, 3)
 
 # =============================================================================
 # MAIN EXTRACTION FUNCTION

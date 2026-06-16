@@ -1,7 +1,9 @@
 # =============================================================================
+# main.py
+# =============================================================================
 # OCR BATCH PIPELINE - Main Orchestrator (JSON-First Architecture)
 # =============================================================================
-# 
+
 # Usage Examples:
 #   python main.py                              # Auto-generated batch ID
 #   python main.py --batch-id Run_A             # Custom batch ID
@@ -261,6 +263,14 @@ def run_smart_filing_and_routing(
     corrections_count = 0
     for res, rec in zip(results, corrected_records):
         original_job = res["job_number"]
+        
+        # ✅ NEW: RED INK INTERCEPTION / HITL OVERRIDE
+        meta = res.get("meta", {})
+        if meta.get("has_red_correction"):
+            res["status"] = "Manual Review Required"
+            res["error"] = "correction_mark_detected"
+            logger_final.warning(f"🚩 Manual Review Triggered: Red correction ink detected in {res['filename']}")
+            continue
 
         if rec.corrected_job and rec.corrected_job not in FAILED_JOB_MARKERS:
             if rec.corrected_job != original_job:
@@ -409,3 +419,7 @@ if __name__ == "__main__":
             main_logger.warning("No extraction results generated.")
     else:
         main_logger.warning("No files were prepared. Halting.")
+
+# =============================================================================
+# END OF FILE
+# =============================================================================
