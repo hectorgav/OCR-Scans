@@ -1,4 +1,4 @@
-# OCR Pipeline Architecture: Job Number Extraction (V3.1.12)
+# OCR Pipeline Architecture: Job Number Extraction (V3.1.13)
 
 ## 🎯 Overview
 This project is a high-resilience, high-throughput Python OCR pipeline designed to extract engineering **Job Numbers** (Strict Format: `YY0XXX-SS`) from chaotic, noisy, and degraded schematic scans. 
