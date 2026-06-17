@@ -7,7 +7,7 @@
 """
 The Macro-Normalized Orchestrator.
 Executes the Step-Scaling Dragnet. Attempts a tight, high-accuracy YOLO crop first.
-If it fails, expands drastically horizontally to ensure decapitated double-suffixes 
+If it fails, expands drastically horizontally to ensure decapitated double-suffixes
 are caught. Includes prioritized Color-Ink recovery and Red Ink correction flagging.
 """
 
@@ -17,12 +17,14 @@ from typing import Tuple, Optional
 import cv2
 
 from config import (
-    YOLO_MODEL_PATH, YOLO_ENABLED, TITLE_BLOCK_ENABLED, ENABLE_DEBUG_VIZ,
-    YOLO_CONF_DETECTION, TITLE_BLOCK_X_START, TITLE_BLOCK_Y_START, 
-    TITLE_BLOCK_WIDTH, TITLE_BLOCK_HEIGHT,
-    # Calibrated weights
-    OCR_CONFIDENCE_THRESHOLD, FINAL_CONFIDENCE_THRESHOLD,
-    JOB_NUMBER_REGEX_PATTERN, COLOR_BOOST_WEIGHT, YOLO_WEIGHT, OCR_WEIGHT
+    YOLO_MODEL_PATH,
+    YOLO_ENABLED,
+    ENABLE_DEBUG_VIZ,
+    YOLO_CONF_DETECTION,
+    OCR_CONFIDENCE_THRESHOLD,
+    TRUST_OCR_THRESHOLD,
+    COLOR_BOOST_WEIGHT,
+    BLUE_STAMP_ENHANCEMENT_CONFIG,
 )
 
 # --- PIPELINE IMPORTS ---
@@ -42,6 +44,7 @@ from src.pipeline.blue_stamp_enhancer import BlueStampEnhancer
 from src.pipeline.red_ink_corrector import detect_correction_mark
 
 from src.utils.log import get_logger
+
 logger = get_logger("extractor")
 
 _JOB_DETECTOR = None
@@ -52,19 +55,13 @@ _BLUE_STAMP_ENHANCER = None
 # SINGLETON INITIALIZERS
 # =============================================================================
 
+
 def get_blue_stamp_enhancer():
     global _BLUE_STAMP_ENHANCER
     if _BLUE_STAMP_ENHANCER is None:
-        config = {
-            "saturation_boost": 1.8,      
-            "value_boost": 1.3,           
-            "clahe_clip_limit": 4.0,      
-            "dilation_iterations": 1,
-            "gamma": 0.7,                 
-            "debug_mode": False
-        }
-        _BLUE_STAMP_ENHANCER = BlueStampEnhancer(config)
+        _BLUE_STAMP_ENHANCER = BlueStampEnhancer(BLUE_STAMP_ENHANCEMENT_CONFIG)
     return _BLUE_STAMP_ENHANCER
+
 
 def get_job_detector():
     global _JOB_DETECTOR
@@ -74,6 +71,7 @@ def get_job_detector():
         except Exception as e:
             logger.error(f"❌ Failed to load JobDetector: {e}")
     return _JOB_DETECTOR
+
 
 def get_ocr_engine():
     global _OCR_ENGINE
@@ -85,62 +83,55 @@ def get_ocr_engine():
             logger.error(f"❌ Failed to load OcrEngine: {e}")
     return _OCR_ENGINE
 
-def _compute_final_confidence(
-    yolo_conf: float, 
-    ocr_conf: float, 
-    method: str,
-    has_color_enhancement: bool = False
-) -> float:
-    """
-    Computes fused confidence using calibrated, config-driven weights.
-    Bypasses hardcoded rules.
-    """
-    # 1. Run weighted fusion using config ratios (0.35 YOLO + 0.65 OCR)
-    base_conf = weighted_confidence_fusion(
-        yolo_conf, ocr_conf, 
-        yolo_weight=YOLO_WEIGHT, 
-        ocr_weight=OCR_WEIGHT
-    )
-    
-    # 2. Safely apply color boost if a specialized color tracker was used
-    if has_color_enhancement and "color" in method.lower():
-        base_conf = min(1.0, base_conf + COLOR_BOOST_WEIGHT)
-    
-    return round(base_conf, 3)
 
 # =============================================================================
 # MAIN EXTRACTION FUNCTION
 # =============================================================================
 
+
 def extract_job_number(
     image_path: Path, original_file_path: Path
 ) -> Tuple[Optional[str], float, str, dict]:
     """
-    Main extraction pipeline. Integrates YOLO detection, multi-spectrum HSV 
+    Main extraction pipeline. Integrates YOLO detection, multi-spectrum HSV
     blue-stamp enhancement, dual-stage OCR, and Red Ink Correction flagging.
     """
-    debug_stem = original_file_path.stem
+    # FIX: Use the unique pipeline stem (from image_path) for debug images to prevent collisions
+    debug_stem = image_path.stem.replace("_ready", "")
+
     ocr_engine = get_ocr_engine()
-    enhancer = get_blue_stamp_enhancer()  
-    
+    enhancer = get_blue_stamp_enhancer()
+
     # Initialize default metadata dictionary
     meta = {"has_red_correction": False, "error": None}
-    
+
     if ocr_engine is None:
         logger.error("OCR Engine failed to initialize. Aborting extraction.")
-        return None, 0.0, "failed", {"error": "ocr_engine_missing", "has_red_correction": False}
-        
+        return (
+            None,
+            0.0,
+            "failed",
+            {"error": "ocr_engine_missing", "has_red_correction": False},
+        )
+
     viz = DebugVisualizer(enabled=ENABLE_DEBUG_VIZ)
     orient_corrector = OrientationCorrector()
     detector = get_job_detector()
 
     raw_image = cv2.imread(str(image_path))
-    if raw_image is None: 
-        return None, 0.0, "failed", {"error": "image_load_failed", "has_red_correction": False}
+    if raw_image is None:
+        return (
+            None,
+            0.0,
+            "failed",
+            {"error": "image_load_failed", "has_red_correction": False},
+        )
 
     # Handle page orientation for schematics
     h_raw, w_raw = raw_image.shape[:2]
-    oriented_image = cv2.rotate(raw_image, cv2.ROTATE_90_CLOCKWISE) if h_raw > w_raw else raw_image
+    oriented_image = (
+        cv2.rotate(raw_image, cv2.ROTATE_90_CLOCKWISE) if h_raw > w_raw else raw_image
+    )
     h_proc, w_proc = oriented_image.shape[:2]
 
     # -------------------------------------------------------------------------
@@ -157,7 +148,7 @@ def extract_job_number(
                 x1, y1, x2, y2 = det["box"]
                 yolo_conf = det["confidence"]
                 w_box, h_box = x2 - x1, y2 - y1
-                
+
                 best_jn = None
                 best_conf = 0.0
                 best_method = ""
@@ -165,65 +156,105 @@ def extract_job_number(
                 # --- STEP 1A: TIGHT CROP (with enhancement) ---
                 pad_w_t = int(max(10, w_box * 0.05))
                 pad_h_t = int(max(10, h_box * 0.05))
-                roi_tight = processed_page[max(0, y1-pad_h_t):min(h_proc, y2+pad_h_t), 
-                                           max(0, x1-pad_w_t):min(w_proc, x2+pad_w_t)]
-                
+                roi_tight = processed_page[
+                    max(0, y1 - pad_h_t) : min(h_proc, y2 + pad_h_t),
+                    max(0, x1 - pad_w_t) : min(w_proc, x2 + pad_w_t),
+                ]
+
                 if roi_tight.size > 0:
                     roi_enhanced = enhancer.enhance(roi_tight, method="combined")
-                    jn, ocr_conf, used_img, method = orient_corrector.recover_text_orientation(
-                        roi_enhanced, ocr_engine, is_tight_crop=True
+                    jn, ocr_conf, used_img, method = (
+                        orient_corrector.recover_text_orientation(
+                            roi_enhanced, ocr_engine, is_tight_crop=True
+                        )
                     )
-                    
+
                     if jn:
                         # Detect Red Ink inside the Crop
                         has_red = detect_correction_mark(roi_tight)
                         meta["has_red_correction"] = has_red
 
                         f_conf = combine_confidences(yolo_conf, ocr_conf, method=method)
-                        if "color" in method.lower(): f_conf = min(1.0, f_conf + 0.15)
 
-                        viz.save_ocr_debug(debug_stem, f"yolo_tight_{method}_enhanced", jn, f_conf, roi_img=used_img)
-                        
-                        if f_conf >= 0.75: 
+                        if "color" in method.lower():
+                            f_conf = min(1.0, f_conf + COLOR_BOOST_WEIGHT)
+
+                        viz.save_ocr_debug(
+                            debug_stem,
+                            f"yolo_tight_{method}_enhanced",
+                            jn,
+                            f_conf,
+                            roi_img=used_img,
+                        )
+
+                        if f_conf >= TRUST_OCR_THRESHOLD:
                             return jn, f_conf, f"yolo_tight_{method}_enhanced", meta
                         else:
-                            best_jn, best_conf, best_method = jn, f_conf, f"yolo_tight_{method}_enhanced"
-                    
+                            best_jn, best_conf, best_method = (
+                                jn,
+                                f_conf,
+                                f"yolo_tight_{method}_enhanced",
+                            )
+
                     # Fallback to original (non-enhanced)
-                    if not best_jn or best_conf < 0.70:
-                        jn_orig, ocr_conf_orig, used_img_orig, method_orig = orient_corrector.recover_text_orientation(
-                            roi_tight, ocr_engine, is_tight_crop=True
+                    if not best_jn or best_conf < OCR_CONFIDENCE_THRESHOLD:
+                        jn_orig, ocr_conf_orig, used_img_orig, method_orig = (
+                            orient_corrector.recover_text_orientation(
+                                roi_tight, ocr_engine, is_tight_crop=True
+                            )
                         )
                         if jn_orig:
                             has_red = detect_correction_mark(roi_tight)
                             meta["has_red_correction"] = has_red
-                            
-                            f_conf_orig = combine_confidences(yolo_conf, ocr_conf_orig, method=method_orig)
+
+                            f_conf_orig = combine_confidences(
+                                yolo_conf, ocr_conf_orig, method=method_orig
+                            )
                             if f_conf_orig > best_conf:
-                                best_jn, best_conf, best_method = jn_orig, f_conf_orig, f"yolo_tight_{method_orig}"
+                                best_jn, best_conf, best_method = (
+                                    jn_orig,
+                                    f_conf_orig,
+                                    f"yolo_tight_{method_orig}",
+                                )
 
                 # --- STEP 1B: WIDE DRAGNET (with enhancement) ---
-                pad_w_w = int(max(50, w_box * 0.80)) 
+                pad_w_w = int(max(50, w_box * 0.80))
                 pad_h_w = int(max(30, h_box * 0.40))
-                roi_wide = processed_page[max(0, y1-pad_h_w):min(h_proc, y2+pad_h_w), 
-                                          max(0, x1-pad_w_w):min(w_proc, x2+pad_w_w)]
-                
+                roi_wide = processed_page[
+                    max(0, y1 - pad_h_w) : min(h_proc, y2 + pad_h_w),
+                    max(0, x1 - pad_w_w) : min(w_proc, x2 + pad_w_w),
+                ]
+
                 if roi_wide.size > 0:
                     roi_wide_enhanced = enhancer.enhance(roi_wide, method="combined")
-                    jn, ocr_conf, used_img, method = orient_corrector.recover_text_orientation(
-                        roi_wide_enhanced, ocr_engine, is_tight_crop=False
+                    jn, ocr_conf, used_img, method = (
+                        orient_corrector.recover_text_orientation(
+                            roi_wide_enhanced, ocr_engine, is_tight_crop=False
+                        )
                     )
                     if jn:
                         has_red = detect_correction_mark(roi_wide)
                         meta["has_red_correction"] = has_red
-                        
+
                         f_conf = combine_confidences(yolo_conf, ocr_conf, method=method)
-                        if "color" in method.lower(): f_conf = min(1.0, f_conf + 0.15)
-                        
-                        viz.save_ocr_debug(debug_stem, f"yolo_wide_{method}_enhanced", jn, f_conf, roi_img=used_img)
-                        
+
+                        if "color" in method.lower():
+                            f_conf = min(1.0, f_conf + COLOR_BOOST_WEIGHT)
+
+                        viz.save_ocr_debug(
+                            debug_stem,
+                            f"yolo_wide_{method}_enhanced",
+                            jn,
+                            f_conf,
+                            roi_img=used_img,
+                        )
+
                         if f_conf > best_conf:
-                            best_jn, best_conf, best_method = jn, f_conf, f"yolo_wide_{method}_enhanced"
+                            best_jn, best_conf, best_method = (
+                                jn,
+                                f_conf,
+                                f"yolo_wide_{method}_enhanced",
+                            )
 
                 if best_jn:
                     return best_jn, best_conf, best_method, meta
@@ -231,36 +262,41 @@ def extract_job_number(
     # -------------------------------------------------------------------------
     # PHASE 1.5: MULTI-SPECTRUM HSV SNIPER (Targeted Region - UNRESTRICTED)
     # -------------------------------------------------------------------------
-    # Removed the strict coordinate cropping. Let the HSV detector find 
-    # blue/green stamps anywhere on the page to prevent rotation failure.
     if oriented_image.size > 0:
         enhanced_image = enhancer.enhance(oriented_image, method="hsv")
         hsv_result = extract_blue_stamp(enhanced_image, ocr_engine)
-        
+
         if hsv_result:
             hsv_job, hsv_conf, hsv_crop = hsv_result
-            # Detect Red Ink inside the HSV crop
             has_red = detect_correction_mark(hsv_crop)
             meta["has_red_correction"] = has_red
-            
-            viz.save_ocr_debug(debug_stem, "hsv_sniper_enhanced", hsv_job, hsv_conf, roi_img=hsv_crop)
+
+            viz.save_ocr_debug(
+                debug_stem, "hsv_sniper_enhanced", hsv_job, hsv_conf, roi_img=hsv_crop
+            )
             return hsv_job, hsv_conf, "hsv_stamp_sniper_enhanced", meta
 
     # -------------------------------------------------------------------------
     # PHASE 3: FAST QUADRANT FALLBACK (with enhancement)
     # -------------------------------------------------------------------------
-    br_quad = oriented_image[int(h_proc * 0.45):h_proc, int(w_proc * 0.45):w_proc]
+    br_quad = oriented_image[int(h_proc * 0.45) : h_proc, int(w_proc * 0.45) : w_proc]
     if br_quad.size > 0:
         br_quad_enhanced = enhancer.enhance(br_quad, method="combined")
         jn, conf, used_img, method = orient_corrector.recover_text_orientation(
             br_quad_enhanced, ocr_engine, is_tight_crop=False
         )
-        if jn: 
+        if jn:
             has_red = detect_correction_mark(br_quad)
             meta["has_red_correction"] = has_red
             return jn, conf, f"title_block_BR_{method}_enhanced", meta
 
-    return None, 0.0, "failed", {"error": "all_methods_failed", "has_red_correction": False}
+    return (
+        None,
+        0.0,
+        "failed",
+        {"error": "all_methods_failed", "has_red_correction": False},
+    )
+
 
 # =============================================================================
 # END OF FILE

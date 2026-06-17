@@ -43,7 +43,7 @@ try:
         if hasattr(os, "add_dll_directory"):
             os.add_dll_directory(torch_lib)
         os.environ["PATH"] = torch_lib + os.pathsep + os.environ.get("PATH", "")
-        
+
     import torch
     from ultralytics import YOLO
 except Exception:
@@ -53,19 +53,34 @@ except Exception:
 # CONFIG & PIPELINE IMPORTS
 # =============================================================================
 from config import (
-    INPUT_DIR, PREPROCESSED_DIR, REPORTS_DIR, MAX_WORKERS,
-    SUPPORTED_EXTENSIONS, TRUST_OCR_THRESHOLD, FORCE_MANUAL_REVIEW, HOLDING_ZONE_DIR
+    INPUT_DIR,
+    PREPROCESSED_DIR,
+    REPORTS_DIR,
+    MAX_WORKERS,
+    SUPPORTED_EXTENSIONS,
+    TRUST_OCR_THRESHOLD,
+    FORCE_MANUAL_REVIEW,
+    HOLDING_ZONE_DIR,
 )
 
 from src.pipeline.extractor import extract_job_number
 from src.pipeline.smart_filing import smart_correct_batch, Record, FAILED_JOB_MARKERS
 from src.utils.pdf_utils import pdf_to_images
-from src.utils.fs import setup_directory_structure, route_to_success, route_to_failed
+
+# FIX: Added generate_unique_filename and extract_original_filename for provenance tracking
+from src.utils.fs import (
+    setup_directory_structure,
+    route_to_success,
+    route_to_failed,
+    generate_unique_filename,
+    extract_original_filename,
+)
 from src.utils.log import get_logger, log_pipeline_start, log_error, log_banner
 
 from src.utils.statistics import generate_pipeline_run_data, WallClockTracker
 
 logger = get_logger("main_orchestrator")
+
 
 # =============================================================================
 # SESSION CONTEXT MANAGER
@@ -76,12 +91,12 @@ class BatchSession:
             self.batch_id = cli_args.batch_id
         else:
             self.batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
+
         self.input_dir = Path(cli_args.input_dir) if cli_args.input_dir else INPUT_DIR
-        
+
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         self.raw_data_json = REPORTS_DIR / "latest_run_data.json"
-        
+
         self.auto_verify_batch = cli_args.auto_verify
 
 
@@ -95,7 +110,9 @@ def get_known_jobs_from_user() -> Optional[Set[str]]:
 
     user_input = input("Known Jobs > ")
     if not user_input.strip():
-        logger.info("No known jobs provided. Smart filing will use best-guess consensus logic.")
+        logger.info(
+            "No known jobs provided. Smart filing will use best-guess consensus logic."
+        )
         return None
 
     jobs = {job.strip() for job in user_input.split(",") if job.strip()}
@@ -108,7 +125,13 @@ def find_input_files(directory: Path) -> List[Path]:
         logger.error(f"Input directory not found: {directory}")
         return []
     valid_exts = {ext.replace("*", "").lower() for ext in SUPPORTED_EXTENSIONS}
-    return sorted([f for f in directory.iterdir() if f.is_file() and f.suffix.lower() in valid_exts])
+    return sorted(
+        [
+            f
+            for f in directory.iterdir()
+            if f.is_file() and f.suffix.lower() in valid_exts
+        ]
+    )
 
 
 def run_conversion_stage(session: BatchSession, output_dir: Path) -> int:
@@ -121,11 +144,17 @@ def run_conversion_stage(session: BatchSession, output_dir: Path) -> int:
     success_count = 0
     for file_path in tqdm(input_files, desc="Preparing Files"):
         try:
-            out_path = output_dir / f"{file_path.stem}_ready.jpg"
+            # FIX: Generate globally unique filename to prevent scan### collisions
+            unique_name = generate_unique_filename(file_path, session.batch_id)
+            unique_stem = Path(unique_name).stem
+
+            out_path = output_dir / f"{unique_stem}_ready.jpg"
             if file_path.suffix.lower() == ".pdf":
                 images = pdf_to_images(str(file_path), max_pages=1)
                 if images is not None and len(images) > 0:
-                    cv2.imwrite(str(out_path), images[0], [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    cv2.imwrite(
+                        str(out_path), images[0], [cv2.IMWRITE_JPEG_QUALITY, 95]
+                    )
                     success_count += 1
             else:
                 img = cv2.imread(str(file_path))
@@ -138,15 +167,22 @@ def run_conversion_stage(session: BatchSession, output_dir: Path) -> int:
     return success_count
 
 
-def process_single_file(image_path: str, original_file_path: str) -> Dict[str, Any]:
+def process_single_file(
+    image_path: str, original_file_path: str, unique_stem: str, original_filename: str
+) -> Dict[str, Any]:
     start_time = time.monotonic()
     try:
         job_number, confidence, method, details = extract_job_number(
             image_path=Path(image_path), original_file_path=Path(original_file_path)
         )
 
+        # FIX: Reconstruct unique filename with original extension (e.g., 20260618_1510_scan001.pdf)
+        original_ext = Path(original_file_path).suffix
+        unique_filename = f"{unique_stem}{original_ext}"
+
         result = {
-            "filename": Path(original_file_path).name,
+            "filename": unique_filename,
+            "original_filename": original_filename,
             "original_path": str(original_file_path),
             "job_number": job_number,
             "confidence": confidence,
@@ -161,18 +197,24 @@ def process_single_file(image_path: str, original_file_path: str) -> Dict[str, A
 
         if not job_number or job_number in FAILED_JOB_MARKERS:
             error_reason = details.get("error", "extraction_failed")
-            result.update({
-                "method": "failed",
-                "error": error_reason,
-                "status": f"Failure: {error_reason}",
-                "raw_job_number": "failed",
-            })
+            result.update(
+                {
+                    "method": "failed",
+                    "error": error_reason,
+                    "status": f"Failure: {error_reason}",
+                    "raw_job_number": "failed",
+                }
+            )
 
         return result
 
     except Exception as e:
+        original_ext = Path(original_file_path).suffix
+        unique_filename = f"{unique_stem}{original_ext}"
+
         return {
-            "filename": Path(original_file_path).name,
+            "filename": unique_filename,
+            "original_filename": original_filename,
             "original_path": str(original_file_path),
             "job_number": None,
             "confidence": 0.0,
@@ -185,7 +227,9 @@ def process_single_file(image_path: str, original_file_path: str) -> Dict[str, A
         }
 
 
-def run_extraction_batch(session: BatchSession, oriented_dir: Path, max_workers: int) -> List[Dict[str, Any]]:
+def run_extraction_batch(
+    session: BatchSession, oriented_dir: Path, max_workers: int
+) -> List[Dict[str, Any]]:
     logger_extraction = get_logger("extraction_stage")
     log_banner(logger_extraction, "STARTING STAGE 2: JOB NUMBER EXTRACTION")
 
@@ -196,11 +240,23 @@ def run_extraction_batch(session: BatchSession, oriented_dir: Path, max_workers:
         logger.warning(f"No pre-processed images found in {oriented_dir}.")
         return []
 
-    tasks = [
-        (str(img_path), str(original_files[img_path.stem.replace("_ready", "")])) 
-        for img_path in ready_images 
-        if img_path.stem.replace("_ready", "") in original_files
-    ]
+    tasks = []
+    for img_path in ready_images:
+        # img_path.stem is e.g., 20260618_1510_scan001_ready
+        unique_stem = img_path.stem.replace("_ready", "")
+
+        # FIX: Recover the original stem (e.g., scan001) to map to the original file
+        orig_stem = extract_original_filename(unique_stem, session.batch_id)
+        orig_stem = Path(orig_stem).stem
+
+        if orig_stem in original_files:
+            original_path = original_files[orig_stem]
+            # Pass unique stem and original filename to the worker
+            tasks.append(
+                (str(img_path), str(original_path), unique_stem, original_path.name)
+            )
+        else:
+            logger.warning(f"Could not map {unique_stem} to original file {orig_stem}")
 
     config_summary = {
         "Mode": "Heuristic-First Pipeline Extraction",
@@ -211,18 +267,27 @@ def run_extraction_batch(session: BatchSession, oriented_dir: Path, max_workers:
 
     results = []
     effective_workers = max_workers
-    
+
     if effective_workers <= 1:
-        logger.info("Running stage 2 in sequential mode (1 worker) for maximum stability.")
-        for img, pdf in tqdm(tasks, desc="Extracting"):
-            results.append(process_single_file(img, pdf))
+        logger.info(
+            "Running stage 2 in sequential mode (1 worker) for maximum stability."
+        )
+        for img, orig, u_stem, o_name in tqdm(tasks, desc="Extracting"):
+            results.append(process_single_file(img, orig, u_stem, o_name))
     else:
         with ProcessPoolExecutor(max_workers=effective_workers) as executor:
             future_to_task = {
-                executor.submit(process_single_file, img, pdf): (img, pdf) 
-                for img, pdf in tasks
+                executor.submit(process_single_file, img, orig, u_stem, o_name): (
+                    img,
+                    orig,
+                    u_stem,
+                    o_name,
+                )
+                for img, orig, u_stem, o_name in tasks
             }
-            for future in tqdm(as_completed(future_to_task), total=len(tasks), desc="Extracting"):
+            for future in tqdm(
+                as_completed(future_to_task), total=len(tasks), desc="Extracting"
+            ):
                 try:
                     results.append(future.result())
                 except Exception as exc:
@@ -234,12 +299,12 @@ def run_extraction_batch(session: BatchSession, oriented_dir: Path, max_workers:
 
 def run_smart_filing_and_routing(
     session: BatchSession,
-    results: List[Dict[str, Any]], 
+    results: List[Dict[str, Any]],
     known_jobs: Optional[Set[str]],
-    elapsed_time: Optional[float] = None
+    elapsed_time: Optional[float] = None,
 ):
     """
-    Stage 3 & 4: Applies consensus logic to finalize job numbers and routes 
+    Stage 3 & 4: Applies consensus logic to finalize job numbers and routes
     files based on AI confidence and manual review settings.
     """
     logger_final = get_logger("final_stage")
@@ -248,10 +313,10 @@ def run_smart_filing_and_routing(
     # 1. Convert raw results into Records for the consensus engine
     records = [
         Record(
-            filename=r["filename"],
+            filename=r["filename"],  # Uses the unique pipeline filename
             raw_job=r.get("job_number") if r.get("job_number") else "failed",
             confidence=r.get("confidence", 0.0),
-            meta=r.get("meta", {})
+            meta=r.get("meta", {}),
         )
         for r in results
     ]
@@ -263,13 +328,15 @@ def run_smart_filing_and_routing(
     corrections_count = 0
     for res, rec in zip(results, corrected_records):
         original_job = res["job_number"]
-        
+
         # ✅ NEW: RED INK INTERCEPTION / HITL OVERRIDE
         meta = res.get("meta", {})
         if meta.get("has_red_correction"):
             res["status"] = "Manual Review Required"
             res["error"] = "correction_mark_detected"
-            logger_final.warning(f"🚩 Manual Review Triggered: Red correction ink detected in {res['filename']}")
+            logger_final.warning(
+                f"🚩 Manual Review Triggered: Red correction ink detected in {res['filename']}"
+            )
             continue
 
         if rec.corrected_job and rec.corrected_job not in FAILED_JOB_MARKERS:
@@ -294,50 +361,66 @@ def run_smart_filing_and_routing(
     # STAGE 4: HITL-AWARE ROUTING & REPORTING
     # ---------------------------------------------------------
     log_banner(logger_final, "STARTING STAGE 4: ROUTING & REPORTING (HITL ENABLED)")
-    
+
     for res in tqdm(results, desc="Routing"):
-        original_path = Path(res["original_path"]) 
-        filename = res["filename"]
+        original_path = Path(res["original_path"])
+        unique_filename = res["filename"]
+        original_filename = res["original_filename"]
         confidence = res.get("confidence", 0.0)
 
         # --- HITL ROUTING LOGIC ---
         # Evaluate if the AI can be trusted based on configuration
-        is_trusted = (res["status"] == "Success" and confidence >= TRUST_OCR_THRESHOLD)
+        is_trusted = res["status"] == "Success" and confidence >= TRUST_OCR_THRESHOLD
 
         # Apply Global Manual Override (Forces everything to Holding Zone for testing)
         if FORCE_MANUAL_REVIEW:
             is_trusted = False
 
         # --- PHYSICAL FILE ROUTING ---
-        if is_trusted and res.get("job_number") and res["job_number"] not in FAILED_JOB_MARKERS:
-            # AUTOMATED PATH: AI is confident and passed all validation checks
-            route_to_success(original_path, res["job_number"])
-            logger_final.info(f"✅ Trusted OCR: {filename} -> {res['job_number']}")
+        if (
+            is_trusted
+            and res.get("job_number")
+            and res["job_number"] not in FAILED_JOB_MARKERS
+        ):
+            # AUTOMATED PATH: Route to success with CLEAN original filename
+            route_to_success(
+                original_path, res["job_number"], original_filename=original_filename
+            )
+            logger_final.info(
+                f"✅ Trusted OCR: {unique_filename} -> {res['job_number']}"
+            )
         else:
-            # MANUAL REVIEW PATH: Low confidence or forced review mode
-            # Moving files to Holding Zone triggers the Streamlit Action Queue
+            # MANUAL REVIEW PATH: Route to Holding Zone with UNIQUE filename
             HOLDING_ZONE_DIR.mkdir(parents=True, exist_ok=True)
             try:
-                # We use shutil.move to relocate the file for the dashboard to find
                 import shutil
-                shutil.move(str(original_path), str(HOLDING_ZONE_DIR / original_path.name))
-                logger_final.warning(f"🛠️ HITL Required: {filename} moved to Holding Zone")
+
+                # FIX: Move and rename to the unique filename to prevent holding zone collisions
+                shutil.move(str(original_path), str(HOLDING_ZONE_DIR / unique_filename))
+                logger_final.warning(
+                    f"🛠️ HITL Required: {unique_filename} moved to Holding Zone"
+                )
             except Exception as e:
-                logger_final.error(f"Failed to move {filename} to Holding Zone: {e}")
+                logger_final.error(
+                    f"Failed to move {unique_filename} to Holding Zone: {e}"
+                )
 
     # 4. Generate Final Batch Report
     formatted_report = generate_pipeline_run_data(
-        results=results, 
+        results=results,
         output_json_path=session.raw_data_json,
         batch_id=session.batch_id,
-        elapsed_time=elapsed_time
+        elapsed_time=elapsed_time,
     )
 
     # --- HITL DASHBOARD FIX ---
     # Save a permanent copy of the report named with the specific batch_id.
     # The Streamlit dashboard requires this file to map guesses to the Action Queue images.
     import shutil
-    permanent_json = session.raw_data_json.with_name(f"{session.batch_id}_run_data.json")
+
+    permanent_json = session.raw_data_json.with_name(
+        f"{session.batch_id}_run_data.json"
+    )
     shutil.copy2(str(session.raw_data_json), str(permanent_json))
     # --------------------------
 
@@ -354,27 +437,35 @@ def run_smart_filing_and_routing(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OCR Batch Pipeline")
     parser.add_argument(
-        "--batch-id", type=str, default=None,
-        help="Batch identifier for archiving. Auto-generated if not provided."
+        "--batch-id",
+        type=str,
+        default=None,
+        help="Batch identifier for archiving. Auto-generated if not provided.",
     )
-    parser.add_argument("--input-dir", type=str, default=None, help="Override input directory")
     parser.add_argument(
-        "--auto-verify", type=str, default=None, 
-        help="Immediately run verify.py after execution using this ground truth CSV"
+        "--input-dir", type=str, default=None, help="Override input directory"
     )
-    
+    parser.add_argument(
+        "--auto-verify",
+        type=str,
+        default=None,
+        help="Immediately run verify.py after execution using this ground truth CSV",
+    )
+
     args = parser.parse_args()
-    
+
     setup_directory_structure()
     session = BatchSession(args)
     main_logger = get_logger("main_orchestrator")
-    
+
     main_logger.info(f"📁 Batch ID: {session.batch_id}")
     main_logger.info(f"📁 Raw Data Export: {session.raw_data_json}")
 
     known_jobs_list = get_known_jobs_from_user()
 
-    ready_files_count = run_conversion_stage(session=session, output_dir=PREPROCESSED_DIR)
+    ready_files_count = run_conversion_stage(
+        session=session, output_dir=PREPROCESSED_DIR
+    )
 
     if ready_files_count > 0:
         with WallClockTracker() as tracker:
@@ -383,38 +474,47 @@ if __name__ == "__main__":
                 oriented_dir=PREPROCESSED_DIR,
                 max_workers=MAX_WORKERS,
             )
-            
+
         if extraction_results:
             run_smart_filing_and_routing(
                 session=session,
                 results=extraction_results,
                 known_jobs=known_jobs_list,
-                elapsed_time=tracker.elapsed
+                elapsed_time=tracker.elapsed,
             )
-            
+
             # =========================================================
             # STAGE 5: AUTO-VERIFICATION (Bulletproofed)
             # =========================================================
             if session.auto_verify_batch:
-                main_logger.info(f"🔄 Triggering Auto-Verification against: {session.auto_verify_batch}.csv")
-                
+                main_logger.info(
+                    f"🔄 Triggering Auto-Verification against: {session.auto_verify_batch}.csv"
+                )
+
                 # Dynamic Path Resolution: Check root, then check 'test' folder
                 _root = Path(__file__).resolve().parent
                 if (_root / "verify.py").exists():
                     verify_script_path = _root / "verify.py"
                 else:
                     verify_script_path = _root / "test" / "verify.py"
-                
+
                 try:
                     subprocess.run(
-                        [sys.executable, str(verify_script_path), "--batch", session.auto_verify_batch], 
-                        check=True
+                        [
+                            sys.executable,
+                            str(verify_script_path),
+                            "--batch",
+                            session.auto_verify_batch,
+                        ],
+                        check=True,
                     )
                 except subprocess.CalledProcessError as e:
-                    main_logger.error(f"❌ Auto-verification script failed with error code: {e.returncode}")
+                    main_logger.error(
+                        f"❌ Auto-verification script failed with error code: {e.returncode}"
+                    )
                 except Exception as e:
                     main_logger.error(f"❌ Failed to launch verify.py: {e}")
-                    
+
         else:
             main_logger.warning("No extraction results generated.")
     else:

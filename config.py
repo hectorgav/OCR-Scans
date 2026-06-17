@@ -10,7 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR
 
 # Explicitly load from the project root so it works even if launched from /scripts/
-load_dotenv(BASE_DIR / ".env")  
+load_dotenv(BASE_DIR / ".env")
 
 # ============================================================================
 # --- ENVIRONMENT STABILITY OVERRIDES ---
@@ -36,14 +36,20 @@ WORK_ENV = os.getenv("WORK_ENV", "OFFICE").upper()
 APP_MODE = os.getenv("APP_MODE", "PRODUCTION").upper()
 
 # Dynamically pull the base paths from your .env file to protect privacy
-input_key = f"{WORK_ENV}_INPUT_DEV" if APP_MODE == "DEVELOPMENT" else f"{WORK_ENV}_INPUT_PROD"
-output_key = f"{WORK_ENV}_OUTPUT_DEV" if APP_MODE == "DEVELOPMENT" else f"{WORK_ENV}_OUTPUT_PROD"
+input_key = (
+    f"{WORK_ENV}_INPUT_DEV" if APP_MODE == "DEVELOPMENT" else f"{WORK_ENV}_INPUT_PROD"
+)
+output_key = (
+    f"{WORK_ENV}_OUTPUT_DEV" if APP_MODE == "DEVELOPMENT" else f"{WORK_ENV}_OUTPUT_PROD"
+)
 
 try:
     INPUT_DIR = Path(os.getenv(input_key))
     OUTPUT_DIR = Path(os.getenv(output_key))  # <--- We grab it directly here!
 except TypeError:
-    raise ValueError(f"CRITICAL: Missing configuration in .env for {input_key} or {output_key}")
+    raise ValueError(
+        f"CRITICAL: Missing configuration in .env for {input_key} or {output_key}"
+    )
 
 # --- SMART PATH REDIRECTION ---
 if APP_MODE == "DEVELOPMENT":
@@ -58,9 +64,9 @@ else:
 # ============================================================================
 
 VALIDATION_CONFIG = {
-    "year_window_past": 4,      # Accept 4 years in past
-    "year_window_future": 1,    # Accept 1 year in future
-    "trust_ocr_threshold": 0.85, # The exact confidence required to bypass human review
+    "year_window_past": 4,  # Accept 4 years in past
+    "year_window_future": 1,  # Accept 1 year in future
+    "trust_ocr_threshold": 0.85,  # The exact confidence required to bypass human review
 }
 
 # Link HITL variables to the single source of truth
@@ -74,10 +80,10 @@ FUZZY_MATCH_CUTOFF = 85
 ALLOWED_SEPARATORS = "-. ="
 
 SMART_FILING_CONFIG = {
-    "neighbor_window": 2,          
-    "max_physical_distance": 2,    
+    "neighbor_window": 2,
+    "max_physical_distance": 2,
     "max_digit_dist": 1,
-    "debug_mode": True,            
+    "debug_mode": True,
 }
 
 # ============================================================================
@@ -98,11 +104,15 @@ DEBUG_FOLDERS = {
 PREPROCESSED_DIR = DEBUG_FOLDERS["preprocessed"]
 
 _REQUIRED_DIRS = [
-    OUTPUT_DIR, REPORTS_DIR, DASHBOARD_DIR, LOG_DIR, 
-    HOLDING_ZONE_DIR, DEBUG_BASE_DIR
+    OUTPUT_DIR,
+    REPORTS_DIR,
+    DASHBOARD_DIR,
+    LOG_DIR,
+    HOLDING_ZONE_DIR,
+    DEBUG_BASE_DIR,
 ] + list(DEBUG_FOLDERS.values())
 
-for directory in _REQUIRED_DIRS: 
+for directory in _REQUIRED_DIRS:
     directory.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================
@@ -110,7 +120,7 @@ for directory in _REQUIRED_DIRS:
 # ============================================================================
 
 LOG_FILENAME = LOG_DIR / "scans_job_extraction.log"
-LOG_FILE_MAX_BYTES = 10 * 1024 * 1024  
+LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
 LOG_FILE_BACKUP_COUNT = 5
 
 PDF_DPI = 300
@@ -124,25 +134,27 @@ MIN_ROTATION_ANGLE_DETECTION = 5
 # --- YOLO DETECTION ---
 # ============================================================================
 
-YOLO_MODEL_PATH = PROJECT_ROOT / "models" / "V002_rect_red_ink.pt" # models\V002_rect_red_ink.pt
+YOLO_MODEL_PATH = (
+    PROJECT_ROOT / "models" / "V002_rect_red_ink.pt"
+)  # models\V002_rect_red_ink.pt
 YOLO_ENABLED = True
-YOLO_CONF_DETECTION = 0.12   
-ENABLE_DEBUG_VIZ = True      
+YOLO_CONF_DETECTION = 0.12
+ENABLE_DEBUG_VIZ = True
 
 # Blue Stamp Enhancement Configuration
 BLUE_STAMP_ENHANCEMENT_CONFIG = {
     "enabled": True,
-    "saturation_boost": 1.8,        
-    "value_boost": 1.3,             
-    "clahe_clip_limit": 4.0,        
-    "clahe_tile_size": (8, 8),      
-    "dilation_iterations": 1,       
-    "kernel_size": 3,               
-    "gamma": 0.7,                   
-    "hue_range": (85, 130),         
-    "min_saturation": 20,           
+    "saturation_boost": 1.8,
+    "value_boost": 1.3,
+    "clahe_clip_limit": 4.0,
+    "clahe_tile_size": (8, 8),
+    "dilation_iterations": 1,
+    "kernel_size": 3,
+    "gamma": 0.7,
+    "hue_range": (85, 130),
+    "min_saturation": 20,
     "debug_mode": True,
-    "try_multiple_methods": True    
+    "try_multiple_methods": True,
 }
 
 # ============================================================================
@@ -150,8 +162,8 @@ BLUE_STAMP_ENHANCEMENT_CONFIG = {
 # ============================================================================
 
 TITLE_BLOCK_ENABLED = True
-TITLE_BLOCK_X_START = 0.55  
-TITLE_BLOCK_Y_START = 0.65  
+TITLE_BLOCK_X_START = 0.55
+TITLE_BLOCK_Y_START = 0.65
 TITLE_BLOCK_WIDTH = 0.45
 TITLE_BLOCK_HEIGHT = 0.35
 
@@ -164,7 +176,7 @@ PADDLE_OCR_CONFIG = {
     "lang": "en",
     "use_gpu": False,
     "show_log": False,
-    "enable_mkldnn": True,  
+    "enable_mkldnn": True,
     "rec_batch_num": 1,
 }
 
@@ -175,7 +187,7 @@ PADDLE_OCR_CONFIG = {
 TEMPLATE_MATCHING_ENABLED = True
 ENABLE_MULTI_ROTATION_OCR = True
 
-# Parallel workers for batch processing. 
+# Parallel workers for batch processing.
 MAX_WORKERS = 4
 
 # ============================================================================
@@ -183,15 +195,15 @@ MAX_WORKERS = 4
 # ============================================================================
 
 # Weighted distribution for final confidence calculation (Must sum to 1.0)
-YOLO_WEIGHT = 0.35             # Box location confidence weight
-OCR_WEIGHT = 0.65              # Character recognition confidence weight
+YOLO_WEIGHT = 0.35  # Box location confidence weight
+OCR_WEIGHT = 0.65  # Character recognition confidence weight
 
 # Reward boost applied when a specialized color track successfully extracts text
-COLOR_BOOST_WEIGHT = 0.10      # Safe, calibrated boost (Capped at 1.0)
+COLOR_BOOST_WEIGHT = 0.10  # Safe, calibrated boost (Capped at 1.0)
 
 # Validation Thresholds
-OCR_CONFIDENCE_THRESHOLD = 0.70    # Minimum confidence to accept an individual OCR read
-FINAL_CONFIDENCE_THRESHOLD = 0.85  # Fused confidence required to bypass human review
+OCR_CONFIDENCE_THRESHOLD = 0.70  # Minimum confidence to accept an individual OCR read
+TRUST_OCR_THRESHOLD = 0.85  # Fused confidence required to bypass human review
 
 # Target validation pattern (######-##)
 JOB_NUMBER_REGEX_PATTERN = r"^\d{6}-\d{2}$"

@@ -186,7 +186,11 @@ def generate_pipeline_run_data(
 
         file_records.append(
             {
+                # FIX: Record both the unique pipeline filename and the clean original name
                 "filename": _safe_get(res, "filename", ""),
+                "original_filename": _safe_get(
+                    res, "original_filename", _safe_get(res, "filename", "")
+                ),
                 "raw_job": str(raw_job) if raw_job else "",
                 "corrected_job": str(corrected_job) if corrected_job else "",
                 "confidence": float(confidence),
@@ -272,7 +276,9 @@ def generate_pipeline_run_data(
     lines.append("--------------------------------------------------")
 
     for r in sorted(successful_extractions, key=lambda x: x.get("filename", " ")):
-        fname = Path(r.get("filename", " ")).stem[:23]
+        # Display the clean original filename in the console if available
+        fname_display = r.get("original_filename", r.get("filename", " "))
+        fname = Path(fname_display).stem[:23]
         job_num = r.get("job_number", "Unknown")
         time_sec = float(r.get("processing_time_sec", 0.0))
         lines.append(
@@ -283,7 +289,8 @@ def generate_pipeline_run_data(
     if hitl_extractions:
         lines.append("\n⚠️ PENDING MANUAL REVIEW (HOLDING ZONE): ")
         for r in sorted(hitl_extractions, key=lambda x: x.get("filename", " ")):
-            fname = Path(r.get("filename", " ")).stem[:21]
+            fname_display = r.get("original_filename", r.get("filename", " "))
+            fname = Path(fname_display).stem[:21]
             guess = r.get("job_number", "No Guess")
             error = r.get("error", "Unknown")
             lines.append(
@@ -293,7 +300,8 @@ def generate_pipeline_run_data(
     if failed_extractions:
         lines.append("\n❌ CRITICAL SYSTEM FAILURES: ")
         for r in failed_extractions:
-            fname = Path(r.get("filename", " ")).stem[:23]
+            fname_display = r.get("original_filename", r.get("filename", " "))
+            fname = Path(fname_display).stem[:23]
             error = r.get("error", "Unknown error")
             lines.append(f"• {fname: <23} | {error: <20}")
 

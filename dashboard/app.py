@@ -18,7 +18,6 @@
 import sys
 import json
 import shutil
-import time
 from datetime import datetime
 from pathlib import Path
 from difflib import SequenceMatcher
@@ -31,7 +30,7 @@ from PIL import Image
 # =============================================================================
 # PATH RESOLUTION & CONFIGURATION
 # =============================================================================
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.append(str(PROJECT_ROOT))
 
 from config import (
@@ -39,14 +38,12 @@ from config import (
     DEBUG_FOLDERS,
     HOLDING_ZONE_DIR,
     OUTPUT_DIR,
+    REPORTS_DIR,
     TRUST_OCR_THRESHOLD,
     APP_MODE,
 )
 
 TRAINING_DATA_DIR = OUTPUT_DIR / "training_data"
-SHADOW_THRESHOLD = (
-    0.85  # The theoretical threshold used to track potential time-savings
-)
 
 # =============================================================================
 # STREAMLIT PAGE CONFIGURATION
@@ -84,14 +81,10 @@ def load_historical_data() -> pd.DataFrame:
             batch_info = data.get("batch_info", {})
             conf_stats = data.get("confidence_stats", {})
 
-            # Extract raw datetime for sorting purposes
             raw_date = pd.to_datetime(data.get("timestamp"))
             total_processed = summary.get("total_in_batch", 0)
-
-            # Safe extraction for backwards-compatibility on older JSON schemas
             verified_files = summary.get("verified_files", total_processed)
 
-            # Safe fallback for verified_trusted to prevent denominator inflation
             verified_trusted = summary.get("verified_trusted_count", 0)
             if (
                 "verified_trusted_count" not in summary
@@ -103,7 +96,6 @@ def load_historical_data() -> pd.DataFrame:
                 {
                     "Batch ID": batch_info.get("batch_id", j_file.stem),
                     "Raw_Date": raw_date,
-                    # Create a strict string label (e.g., "Mar 18, 15:30") for categorical charting
                     "Run Label": raw_date.strftime("%b %d, %H:%M:%S"),
                     "Theoretical Automation (%)": summary.get(
                         "theoretical_automation", 0.0
@@ -119,7 +111,6 @@ def load_historical_data() -> pd.DataFrame:
                     "Verified Processed": verified_files,
                     "Verified Trusted": verified_trusted,
                     "Actual Typos Fixed": summary.get("human_corrections", 0),
-                    # Read raw integer directly to avoid floating-point reconstruction errors
                     "Theoretical Auto Count": summary.get(
                         "theoretical_auto_count",
                         int(
@@ -127,12 +118,11 @@ def load_historical_data() -> pd.DataFrame:
                                 summary.get("theoretical_automation", 0.0)
                                 * total_processed
                             )
-                        ),  # Fallback for legacy JSON
+                        ),
                     ),
                     "Silent Failures": summary.get("silent_failures", 0),
                     "Last Batch OCR Time (s)": summary.get("total_wall_time_sec", 0.0),
                     "Speed (Sec / Scan)": summary.get("avg_speed_sec", 0.0),
-                    # Extract raw sum and count for volume-weighted global average calculation
                     "Confidence Sum": conf_stats.get(
                         "sum", conf_stats.get("mean", 0.0) * total_processed
                     ),
@@ -140,7 +130,6 @@ def load_historical_data() -> pd.DataFrame:
                     "Mean Confidence": conf_stats.get("mean", 0.0) * 100,
                     "Avg Typo Similarity (%)": summary.get("avg_typo_similarity", 1.0)
                     * 100,
-                    # Initial Pipeline Tri-State Metrics (from statistics.py)
                     "Initial Success": summary.get("initial_success", 0),
                     "Initial HITL": summary.get("initial_hitl", 0),
                     "Initial Failed": summary.get("initial_failed", 0),
@@ -158,9 +147,7 @@ def load_historical_data() -> pd.DataFrame:
 
 @st.cache_data(ttl=60)
 def load_method_stats() -> pd.DataFrame:
-    """
-    Aggregates lifetime accuracy for each specific OCR extraction heuristic.
-    """
+    """Aggregates lifetime accuracy for each specific OCR extraction heuristic."""
     if not DASHBOARD_DIR.exists():
         return pd.DataFrame()
 
@@ -168,7 +155,6 @@ def load_method_stats() -> pd.DataFrame:
     json_files = [f for f in json_files if "latest" not in f.name]
 
     aggregated_methods = {}
-
     for j_file in json_files:
         try:
             with open(j_file, "r", encoding="utf-8") as f:
@@ -188,9 +174,7 @@ def load_method_stats() -> pd.DataFrame:
         tot = counts["total"]
         corr = counts["correct"]
         acc = (corr / tot * 100) if tot > 0 else 0.0
-
         display_name = method.replace("_", " ").title()
-
         records.append(
             {"Method": display_name, "Total Processed": tot, "Accuracy (%)": acc}
         )
@@ -205,7 +189,7 @@ def load_method_stats() -> pd.DataFrame:
 def get_all_pending_guesses() -> dict:
     """Loads metadata from ALL run reports to map holding zone files to their origin batch."""
     guesses = {}
-    reports_dir = OUTPUT_DIR / "reports"
+    reports_dir = REPORTS_DIR
 
     if reports_dir.exists():
         for report_file in reports_dir.glob("*_run_data.json"):
@@ -221,6 +205,7 @@ def get_all_pending_guesses() -> dict:
 
                     for f_data in run_data.get("files", []):
                         f_data["batch_id"] = batch_id
+                        # Map using the unique pipeline filename
                         guesses[f_data["filename"]] = f_data
             except Exception:
                 pass
@@ -237,11 +222,9 @@ def update_batch_metrics_stateless(batch_id: str):
         return
 
     try:
-        run_data_path = OUTPUT_DIR / "reports" / f"{batch_id}_run_data.json"
-
+        run_data_path = REPORTS_DIR / f"{batch_id}_run_data.json"
         if not run_data_path.exists():
-            run_data_path = OUTPUT_DIR / "reports" / "latest_run_data.json"
-
+            run_data_path = REPORTS_DIR / "latest_run_data.json"
         if not run_data_path.exists():
             return
 
@@ -284,14 +267,13 @@ def update_batch_metrics_stateless(batch_id: str):
             confidences.append(c)
 
             filename = f_data.get("filename")
-
             is_pending = False
             if filename and (HOLDING_ZONE_DIR / filename).exists():
                 is_pending = True
                 pending_count += 1
 
             # =====================================================================
-            # FIX: STALE STATE BUG RESOLUTION
+            # FIX: STALE STATE BUG RESOLUTION (CONTAMINATION FIX)
             # =====================================================================
             is_corrected = False
             if filename:
@@ -300,34 +282,32 @@ def update_batch_metrics_stateless(batch_id: str):
                     with open(meta_path, "r", encoding="utf-8") as mf:
                         m_data = json.load(mf)
 
-                    # Compare current system guess against the historical ground truth.
-                    # If they match, the system is currently correct, and this is just a leftover file.
-                    historical_ground_truth = str(
-                        m_data.get("human_correction_ground_truth", "")
-                    ).strip()
-
-                    if system_guess and system_guess != historical_ground_truth:
-                        actual_corrections_made += 1
-                        is_corrected = True
-                        similarity_scores.append(m_data.get("similarity_score", 0.0))
+                    meta_batch_id = m_data.get("batch_id")
+                    if meta_batch_id == batch_id:
+                        historical_ground_truth = str(
+                            m_data.get("human_correction_ground_truth", "")
+                        ).strip()
+                        if system_guess and system_guess != historical_ground_truth:
+                            actual_corrections_made += 1
+                            is_corrected = True
+                            similarity_scores.append(
+                                m_data.get("similarity_score", 0.0)
+                            )
             # =====================================================================
 
             is_trusted = (
-                c >= SHADOW_THRESHOLD and system_guess and system_guess != "failed"
+                c >= TRUST_OCR_THRESHOLD and system_guess and system_guess != "failed"
             )
             if is_trusted:
                 theoretical_auto_count += 1
 
             if not is_pending:
                 verified_files_count += 1
-
                 if method not in method_stats:
                     method_stats[method] = {"total": 0, "correct": 0}
                 method_stats[method]["total"] += 1
-
                 if not is_corrected:
                     method_stats[method]["correct"] += 1
-
                 if is_trusted:
                     verified_trusted_count += 1
                     if is_corrected:
@@ -397,16 +377,12 @@ def update_batch_metrics_stateless(batch_id: str):
 
 
 def sync_historical_metrics():
-    """
-    Scans the reports directory for raw batch data. If a batch does not have
-    a corresponding compiled metrics JSON in the dashboard folder, it generates it.
-    """
-    reports_dir = OUTPUT_DIR / "reports"
+    """Scans the reports directory for raw batch data and generates missing metrics."""
+    reports_dir = REPORTS_DIR
     if not reports_dir.exists():
         return
 
     new_metrics_generated = False
-
     for report_file in reports_dir.glob("*_run_data.json"):
         if report_file.name == "latest_run_data.json":
             continue
@@ -421,7 +397,6 @@ def sync_historical_metrics():
             )
 
         metrics_file = DASHBOARD_DIR / f"{batch_id}_metrics.json"
-
         if not metrics_file.exists():
             st.toast(f"Generating new metrics for {batch_id}...", icon="🔄")
             update_batch_metrics_stateless(batch_id)
@@ -514,12 +489,17 @@ def main():
             st.warning(
                 f"**Action Required:** You have {pending_count} files to verify."
             )
-
             guesses = get_all_pending_guesses()
 
             for file_path in pending_files:
                 filename = file_path.name
-                scan_id = file_path.stem.split("_")[0]
+                unique_stem = file_path.stem  # e.g., 20260616_1510_scan001
+
+                # FIX: Extract the original scan_id for display purposes
+                parts = unique_stem.split("_")
+                scan_id = next(
+                    (p for p in parts if p.lower().startswith("scan")), unique_stem
+                )
 
                 file_info = guesses.get(filename, {})
                 system_guess = str(
@@ -534,27 +514,33 @@ def main():
 
                     with col_img:
                         micro_folder = DEBUG_FOLDERS["micro_vision"]
+
+                        # FIX: Use the FULL unique_stem to prevent cross-batch collision
                         possible_crops = list(
-                            micro_folder.glob(f"*{scan_id}_micro_*.jpg")
+                            micro_folder.glob(f"{unique_stem}_micro_*.jpg")
                         )
 
                         if possible_crops:
                             st.image(Image.open(possible_crops[-1]), width="stretch")
                         else:
                             macro_path = (
-                                DEBUG_FOLDERS["preprocessed"] / f"{scan_id}_ready.jpg"
+                                DEBUG_FOLDERS["preprocessed"]
+                                / f"{unique_stem}_ready.jpg"
                             )
                             if macro_path.exists():
                                 st.image(Image.open(macro_path), width="stretch")
                                 if st.button(
-                                    "🔍 View Interactive", key=f"btn_macro_{scan_id}"
+                                    "🔍 View Interactive",
+                                    key=f"btn_macro_{unique_stem}",
                                 ):
-                                    show_full_drawing(macro_path, scan_id)
+                                    show_full_drawing(macro_path, unique_stem)
                             else:
                                 st.write("🖼️ *No Image*")
 
                     with col_info:
+                        # Display the clean scan_id to the user
                         st.markdown(f"#### `{scan_id}`")
+                        st.caption(f"Pipeline ID: `{unique_stem}`")
                         if system_guess and system_guess != "failed":
                             st.write(f"**System Guess:** `{system_guess}`")
                             st.caption(
@@ -570,7 +556,6 @@ def main():
                             if (system_guess and system_guess != "failed")
                             else ""
                         )
-
                         current_input_val = st.text_input(
                             "Confirm / Edit Job Number:",
                             value=default_val,
@@ -587,7 +572,6 @@ def main():
                             use_container_width=True,
                         ):
                             final_job = current_input_val.strip()
-
                             if not final_job:
                                 st.error("Cannot commit empty job number.")
                                 continue
@@ -612,7 +596,6 @@ def main():
                                     similarity = SequenceMatcher(
                                         None, system_guess, final_job
                                     ).ratio()
-
                                     meta_path = (
                                         TRAINING_DATA_DIR
                                         / f"{file_path.stem}_meta.json"
@@ -626,6 +609,7 @@ def main():
                                                 "similarity_score": similarity,
                                                 "confidence": conf,
                                                 "method_used": method_used,
+                                                "batch_id": origin_batch_id,
                                                 "harvested_at": datetime.now().isoformat(),
                                             },
                                             f,
@@ -634,6 +618,10 @@ def main():
                                 except Exception as e:
                                     st.warning(f"Failed to harvest training data: {e}")
 
+                            # FIX: Extract original filename for clean output routing
+                            original_filename = file_info.get(
+                                "original_filename", filename
+                            )
                             safe_job = "".join(
                                 [c for c in final_job if c.isalnum() or c in "-_"]
                             ).strip()
@@ -641,16 +629,17 @@ def main():
                             final_dir.mkdir(parents=True, exist_ok=True)
 
                             try:
-                                shutil.move(str(file_path), str(final_dir / filename))
+                                # Move to success folder using the CLEAN original filename
+                                shutil.move(
+                                    str(file_path), str(final_dir / original_filename)
+                                )
                             except Exception as e:
                                 st.error(f"Failed to move file: {e}")
                                 continue
 
                             update_batch_metrics_stateless(origin_batch_id)
-
                             load_historical_data.clear()
                             load_method_stats.clear()
-
                             st.rerun()
 
     with tab_analytics:
@@ -730,7 +719,6 @@ def main():
             )
 
             latest = df.iloc[-1]
-
             latest_total = latest["Total Processed"]
             latest_hitl_rate = (
                 (latest["Initial HITL"] / latest_total * 100)
@@ -750,14 +738,12 @@ def main():
 
             m_kpi1, m_kpi2, m_kpi3, m_kpi4 = st.columns(4)
             m_kpi1.metric("Total Files", f"{latest_total:,}")
-
             m_kpi2.metric(
                 "Auto-Filed (Success)",
                 f"{latest['Initial Success']:,} ({latest_success_rate:.1f}%)",
                 delta=f"{latest_success_rate - global_success_rate:+.1f}%",
                 help="Files successfully routed without human intervention.",
             )
-
             m_kpi3.metric(
                 "Sent to HITL",
                 f"{latest['Initial HITL']:,} ({latest_hitl_rate:.1f}%)",
@@ -765,7 +751,6 @@ def main():
                 delta_color="inverse",
                 help="Files routed to the Holding Zone for manual review.",
             )
-
             m_kpi4.metric(
                 "Hard Failures",
                 f"{latest['Initial Failed']:,} ({latest_failed_rate:.1f}%)",
@@ -777,14 +762,12 @@ def main():
             h_kpi1, h_kpi2, h_kpi3, h_kpi4 = st.columns(4)
             h_kpi1.metric("Files Verified", f"{latest['Verified Processed']:,}")
             h_kpi2.metric("Typos Fixed", f"{latest['Actual Typos Fixed']:,}")
-
             h_kpi3.metric(
                 "Actual Accuracy",
                 f"{latest['Actual OCR Accuracy (%)']:.1f}%",
                 delta=f"{latest['Actual OCR Accuracy (%)'] - global_accuracy:+.1f}%",
                 help="Accuracy of verified files in this specific batch.",
             )
-
             h_kpi4.metric(
                 "Silent Failure Risk",
                 f"{latest['Silent Failure Rate (%)']:.1f}%",
@@ -799,7 +782,6 @@ def main():
                 f"{latest['Last Batch OCR Time (s)']:.1f}s",
                 help="Total elapsed time for the batch.",
             )
-
             s_kpi2.metric(
                 "Avg Speed (Sec/Scan)",
                 f"{latest['Speed (Sec / Scan)']:.2f}s",
@@ -807,7 +789,6 @@ def main():
                 delta_color="inverse",
                 help="Average processing time per file.",
             )
-
             s_kpi3.metric(
                 "Parallel Speedup",
                 f"{latest['Parallel Speedup']:.2f}x",
@@ -817,13 +798,11 @@ def main():
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.divider()
-
             st.markdown("### 🏆 Pipeline Efficiency (All Time)")
 
             kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-
             kpi1.metric(
-                f"Theoretical Automation (at {SHADOW_THRESHOLD*100:.0f}%)",
+                f"Theoretical Automation (at {TRUST_OCR_THRESHOLD*100:.0f}%)",
                 f"{global_theo_auto:.1f}%",
                 help="Denominator includes ALL files (even pending). Represents maximum potential automation.",
             )
@@ -832,13 +811,11 @@ def main():
                 f"{global_accuracy:.1f}%",
                 help="Denominator strictly excludes pending files. Only counts fully verified files.",
             )
-
             kpi3.markdown(
                 f"**🚨 Silent Failure Risk**<br><h2 style='color: #E74C3C; margin:0;'>{global_silent_rate:.1f}%</h2>",
                 unsafe_allow_html=True,
                 help="Of the files the AI trusted, how many were actually wrong and corrected by a human?",
             )
-
             kpi4.metric(
                 "Avg System Confidence",
                 f"{global_avg_conf:.1f}%",
@@ -846,7 +823,6 @@ def main():
             )
 
             st.markdown("<br>", unsafe_allow_html=True)
-
             v_kpi1, v_kpi2, v_kpi3, v_kpi4 = st.columns(4)
             v_kpi1.metric("Total Scans Processed", f"{total_processed_all_time:,}")
             v_kpi2.metric("Total Typos Fixed", f"{total_typos_all_time:,}")
@@ -857,7 +833,6 @@ def main():
                 if not df_valid_speed.empty
                 else 0.0
             )
-
             v_kpi3.metric(
                 "Last Batch OCR Time",
                 f"{last_run_time:.1f}s",
@@ -866,7 +841,6 @@ def main():
             v_kpi4.metric("Avg Speed (Sec / Scan)", f"{global_avg_speed:.1f}s")
 
             st.divider()
-
             col_chart1, col_chart2 = st.columns(2)
 
             with col_chart1:
@@ -912,7 +886,6 @@ def main():
                 st.info(
                     "Measures how drastically the human had to alter the system's guess."
                 )
-
                 df_with_typos = df[df["Actual Typos Fixed"] > 0]
                 if not df_with_typos.empty:
                     avg_sim = (
@@ -923,20 +896,26 @@ def main():
                     avg_sim = 100.0
 
                 if avg_sim >= 90.0:
-                    sim_color = "#27AE60"
-                    sim_icon = "✅"
-                    sim_title = "High Similarity"
-                    sim_desc = "Errors are minor optical confusions (e.g., 'O' vs '0')."
+                    sim_color, sim_icon, sim_title, sim_desc = (
+                        "#27AE60",
+                        "✅",
+                        "High Similarity",
+                        "Errors are minor optical confusions (e.g., 'O' vs '0').",
+                    )
                 elif avg_sim >= 80.0:
-                    sim_color = "#F39C12"
-                    sim_icon = "⚠️"
-                    sim_title = "Moderate Similarity"
-                    sim_desc = "Partial captures. The AI is likely dropping suffixes or prefixes."
+                    sim_color, sim_icon, sim_title, sim_desc = (
+                        "#F39C12",
+                        "⚠️",
+                        "Moderate Similarity",
+                        "Partial captures. The AI is likely dropping suffixes or prefixes.",
+                    )
                 else:
-                    sim_color = "#E74C3C"
-                    sim_icon = "🚨"
-                    sim_title = "Low Similarity"
-                    sim_desc = "The AI is heavily hallucinating answers or reading the wrong text block."
+                    sim_color, sim_icon, sim_title, sim_desc = (
+                        "#E74C3C",
+                        "🚨",
+                        "Low Similarity",
+                        "The AI is heavily hallucinating answers or reading the wrong text block.",
+                    )
 
                 st.markdown(
                     f"<h1 style='color: {sim_color}; font-size: 3rem;'>{avg_sim:.1f}%</h1>",
@@ -947,7 +926,6 @@ def main():
             with col_diag2:
                 st.markdown("#### 🎯 Accuracy by Extraction Method (Lifetime)")
                 df_methods = load_method_stats()
-
                 if not df_methods.empty:
                     fig_methods = px.bar(
                         df_methods,

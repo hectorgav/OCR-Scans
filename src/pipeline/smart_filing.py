@@ -8,11 +8,15 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Iterable, Set
 from collections import Counter
 from src.validation.validation import UnifiedValidator
-from config import SMART_FILING_CONFIG
+
+# FIX: Import OCR_CONFIDENCE_THRESHOLD directly from config
+from config import SMART_FILING_CONFIG, OCR_CONFIDENCE_THRESHOLD
+
 import re
 import logging
 
 from src.utils.log import get_logger
+
 logger = get_logger("smart_filing")
 
 # =============================================================================
@@ -21,16 +25,23 @@ logger = get_logger("smart_filing")
 
 FAILED_JOB_MARKERS = {"all_methods_failed", "failed", "", None}
 SCAN_NUM_RE = re.compile(r"scan(\d+)", re.IGNORECASE)
-TRUST_OCR_CONFIDENCE_THRESHOLD = SMART_FILING_CONFIG.get("trust_ocr_threshold", 0.70)
+
+# FIX: Removed the ghost variable TRUST_OCR_CONFIDENCE_THRESHOLD.
 DEBUG_SMART_FILING = SMART_FILING_CONFIG.get("debug_mode", False)
+
+# FIX: Defined a clear constant for the Sandwich Rule's high-confidence protection
+# to eliminate the hardcoded "magic number" 0.75.
+SANDWICH_PROTECTION_THRESHOLD = 0.75
 
 # =============================================================================
 # DATA STRUCTURES
 # =============================================================================
 
+
 @dataclass
 class Record:
     """Represents a single scan file with its extraction results."""
+
     filename: str
     raw_job: str
     confidence: float = 0.0
@@ -38,6 +49,7 @@ class Record:
     reason: str = ""
     meta: Dict = field(default_factory=dict)
     candidates: List[Dict] = field(default_factory=list)
+
 
 # =============================================================================
 # MODULE-LEVEL VALIDATOR
@@ -48,6 +60,7 @@ validator = UnifiedValidator()
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
+
 
 def scan_index(filename: str, fallback_idx: int = 0) -> int:
     """Extract numeric scan index from filename."""
@@ -61,7 +74,7 @@ def scan_index(filename: str, fallback_idx: int = 0) -> int:
 def is_valid_format(job: str, confidence: float = 0.0) -> bool:
     """
     Check if job ID passes full validation (format + business logic).
-    
+
     CRITICAL: Passes confidence to validator for ocr_confidence_override support.
     """
     if not job:
@@ -79,7 +92,7 @@ def get_base(job: str) -> Optional[str]:
 def _is_single_char_mutation(s1: str, s2: str) -> bool:
     """
     Check if two strings differ by exactly one character (Hamming distance = 1).
-    
+
     Physics-based OCR error model: faded ink, sensor noise typically cause
     single-character mutations, not multi-character changes.
     """
@@ -91,7 +104,7 @@ def _is_single_char_mutation(s1: str, s2: str) -> bool:
 def _is_failed_job(job: str) -> bool:
     """
     Check if job is a failure marker using set membership.
-    
+
     Prevents Sandwich Rule from propagating failures through the pipeline.
     """
     return job in FAILED_JOB_MARKERS or job is None
@@ -108,6 +121,7 @@ def _debug_log(msg: str, record: Optional[Record] = None) -> None:
 # TIER 0: RED INK CORRECTION
 # =============================================================================
 
+
 def _apply_red_ink_corrections(records: List[Record], known_jobs: Set[str]) -> None:
     """
     Tier 0: Resolves handwritten red ink corrections.
@@ -118,22 +132,28 @@ def _apply_red_ink_corrections(records: List[Record], known_jobs: Set[str]) -> N
         meta = r.meta or {}
         if not meta.get("has_red_correction"):
             continue
-            
+
         raw_text = r.raw_job
         if not raw_text:
             continue
-            
+
         _debug_log(f"Tier 0 triggered. Checking red ink correction on: {raw_text}", r)
-        
+
         # --- SCENARIO A: Suffix Override (e.g., 240298-145 -> 240298-15) ---
         suffix_override_match = re.match(r"(\d{6})-(\d)(\d)(\d)", raw_text)
         if suffix_override_match:
-            prefix, first_suffix, crossed_out, correction = suffix_override_match.groups()
+            prefix, first_suffix, crossed_out, correction = (
+                suffix_override_match.groups()
+            )
             corrected = f"{prefix}-{first_suffix}{correction}"
             if is_valid_format(corrected):
                 r.corrected_job = corrected
-                r.reason = f"Tier 0: Red Ink Suffix Override ({raw_text} -> {corrected})"
-                logger.info(f"✅ Red Ink Suffix Override: {r.filename} | {raw_text} -> {corrected}")
+                r.reason = (
+                    f"Tier 0: Red Ink Suffix Override ({raw_text} -> {corrected})"
+                )
+                logger.info(
+                    f"✅ Red Ink Suffix Override: {r.filename} | {raw_text} -> {corrected}"
+                )
                 continue
 
         # --- SCENARIO B: Isolated Digit Correction (e.g., '250355-32 3') ---
@@ -141,7 +161,7 @@ def _apply_red_ink_corrections(records: List[Record], known_jobs: Set[str]) -> N
         if isolated_digit_match:
             main_job, correction_digit = isolated_digit_match.groups()
             prefix, suffix = main_job.split("-")
-            
+
             # Match against known good jobs to find the correct swap index
             for pos in range(len(prefix)):
                 temp_prefix = list(prefix)
@@ -150,11 +170,13 @@ def _apply_red_ink_corrections(records: List[Record], known_jobs: Set[str]) -> N
                 if test_job in known_jobs:
                     r.corrected_job = test_job
                     r.reason = f"Tier 0: Red Ink Positional Swap via Known Jobs ({raw_text} -> {test_job})"
-                    logger.info(f"✅ Red Ink Swap: {r.filename} | {raw_text} -> {test_job}")
+                    logger.info(
+                        f"✅ Red Ink Swap: {r.filename} | {raw_text} -> {test_job}"
+                    )
                     break
             if r.corrected_job:
                 continue
-        
+
         # --- SCENARIO C: Canceled Stamp with Overwritten Number (e.g., scan360) ---
         # PaddleOCR will return the handwritten number and the stamped number.
         # If we have a red correction flag and the OCR output contains multiple candidates:
@@ -163,116 +185,160 @@ def _apply_red_ink_corrections(records: List[Record], known_jobs: Set[str]) -> N
             # Sort candidates by their vertical position (y-coordinate) or confidence
             # In these scans, the corrected number is ALWAYS written ABOVE (smaller y-value) the stamp.
             # Or, we prioritize the valid format that does NOT match the old stamp.
-            valid_options = [c["text"] for c in candidates if is_valid_format(c["text"])]
-            
+            valid_options = [
+                c["text"] for c in candidates if is_valid_format(c["text"])
+            ]
+
             if len(valid_options) >= 2:
                 # The top-most valid option is our handwritten correction!
                 # Let's say valid_options[0] is '240283-16' (red) and [1] is '240292-20' (blue)
-                corrected = valid_options[0] 
+                corrected = valid_options[0]
                 r.corrected_job = corrected
-                r.reason = f"Tier 0: Red Ink Overwrite Resolved ({raw_text} -> {corrected})"
-                logger.info(f"✅ Resolved Overwritten Stamp: {r.filename} | {raw_text} -> {corrected}")
-                continue        
+                r.reason = (
+                    f"Tier 0: Red Ink Overwrite Resolved ({raw_text} -> {corrected})"
+                )
+                logger.info(
+                    f"✅ Resolved Overwritten Stamp: {r.filename} | {raw_text} -> {corrected}"
+                )
+                continue
 
 
 # =============================================================================
 # TIER 1: SANDWICH RULE
 # =============================================================================
 
+
 def _apply_sandwich_rule(records: List[Record], known_jobs: Set[str]) -> None:
     """
     Tier 1: Adopt neighbor job when bracketed by identical valid jobs.
-    
+
     IMPROVEMENTS:
     1. Check suffix mutation (03→04 is typo, protect 01→10 is batch change)
     2. Require physical proximity (consecutive scans)
     3. Never propagate failure markers
     """
     sorted_recs = sorted(records, key=lambda r: scan_index(r.filename))
-    
+
     for i in range(1, len(sorted_recs) - 1):
         prev_r, curr_r, next_r = sorted_recs[i - 1], sorted_recs[i], sorted_recs[i + 1]
-        
+
         prev_job = prev_r.corrected_job or prev_r.raw_job
         curr_job = curr_r.corrected_job or curr_r.raw_job
         next_job = next_r.corrected_job or next_r.raw_job
-        
+
         # =========================================================
         # CRITICAL FIX: Skip if neighbors are failed/None
         # Prevents failure propagation through the pipeline
         # =========================================================
         if _is_failed_job(prev_job) or _is_failed_job(next_job):
-            _debug_log(f"Sandwich skipped: neighbors are failed (prev={prev_job}, next={next_job})", curr_r)
+            _debug_log(
+                f"Sandwich skipped: neighbors are failed (prev={prev_job}, next={next_job})",
+                curr_r,
+            )
             continue
-        
+
         # Check sandwich condition (prev == next, curr differs)
-        if not (prev_job and next_job and prev_job == next_job and curr_job != prev_job):
+        if not (
+            prev_job and next_job and prev_job == next_job and curr_job != prev_job
+        ):
             continue
-        
+
         # Skip known jobs
         if curr_job in known_jobs:
             continue
-        
+
         # =========================================================
         # ENHANCED SUFFIX SHIELD (v2.0)
         # Protects legitimate unique suffixes, corrects typos
         # =========================================================
-        if is_valid_format(curr_job, curr_r.confidence) and get_base(curr_job) == get_base(prev_job):
-            
+        if is_valid_format(curr_job, curr_r.confidence) and get_base(
+            curr_job
+        ) == get_base(prev_job):
+
             # Extract suffixes for comparison
-            curr_suffix = curr_job.split('-')[1] if '-' in curr_job else None
-            prev_suffix = prev_job.split('-')[1] if '-' in prev_job else None
-            
+            curr_suffix = curr_job.split("-")[1] if "-" in curr_job else None
+            prev_suffix = prev_job.split("-")[1] if "-" in prev_job else None
+
             # If both have suffixes, check if it's a single-char mutation
             if curr_suffix and prev_suffix:
                 # Case A: Single-char suffix mutation (03→04, 01→07) = TYPO, correct it
                 if _is_single_char_mutation(curr_suffix, prev_suffix):
-                    _debug_log(f"Suffix mutation detected: {curr_suffix} → {prev_suffix} (typo, will correct)", curr_r)
+                    _debug_log(
+                        f"Suffix mutation detected: {curr_suffix} → {prev_suffix} (typo, will correct)",
+                        curr_r,
+                    )
                     # Don't protect - let sandwich correction apply
                 # Case B: Multi-char suffix difference (01→10, 03→30) = BATCH CHANGE, protect it
-                elif curr_r.confidence >= 0.75:
-                    _debug_log(f"Unique suffix protected: {curr_suffix} (conf={curr_r.confidence:.2f})", curr_r)
-                    curr_r.reason = f"kept: valid unique suffix (conf {curr_r.confidence:.2f})"
+                # FIX: Replaced hardcoded 0.75 with SANDWICH_PROTECTION_THRESHOLD
+                elif curr_r.confidence >= SANDWICH_PROTECTION_THRESHOLD:
+                    _debug_log(
+                        f"Unique suffix protected: {curr_suffix} (conf={curr_r.confidence:.2f})",
+                        curr_r,
+                    )
+                    curr_r.reason = (
+                        f"kept: valid unique suffix (conf {curr_r.confidence:.2f})"
+                    )
                     continue
             # If confidence is high and no suffix to compare, protect
-            elif curr_r.confidence >= 0.75:
-                curr_r.reason = f"kept: valid unique suffix (conf {curr_r.confidence:.2f})"
+            # FIX: Replaced hardcoded 0.75 with SANDWICH_PROTECTION_THRESHOLD
+            elif curr_r.confidence >= SANDWICH_PROTECTION_THRESHOLD:
+                curr_r.reason = (
+                    f"kept: valid unique suffix (conf {curr_r.confidence:.2f})"
+                )
                 continue
-        
+
         # =========================================================
         # Check physical proximity (must be consecutive scans)
         # Uses topographical layout: consecutive scans = same batch
         # =========================================================
-        dist_prev = abs(scan_index(curr_r.filename, i) - scan_index(prev_r.filename, i - 1))
-        dist_next = abs(scan_index(next_r.filename, i + 1) - scan_index(curr_r.filename, i))
-        
+        dist_prev = abs(
+            scan_index(curr_r.filename, i) - scan_index(prev_r.filename, i - 1)
+        )
+        dist_next = abs(
+            scan_index(next_r.filename, i + 1) - scan_index(curr_r.filename, i)
+        )
+
         if dist_prev <= 1 and dist_next <= 1:
             curr_r.corrected_job = prev_job
             curr_r.reason = f"Tier 1: Sandwich Rule (bracketed by {prev_job})"
-            logger.info(f"✅ Sandwich Rule: {curr_r.filename} | {curr_job} → {prev_job}")
+            logger.info(
+                f"✅ Sandwich Rule: {curr_r.filename} | {curr_job} → {prev_job}"
+            )
 
 
 # =============================================================================
 # TIER 2: SUFFIX INHERITANCE
 # =============================================================================
 
+
 def _apply_suffix_inheritance(records: List[Record], known_jobs: Set[str]) -> None:
     """Tier 2: Inherit suffix from neighbor when base matches."""
     sorted_recs = sorted(records, key=lambda r: scan_index(r.filename))
-    
+
     for i, curr_r in enumerate(sorted_recs):
         curr_job = curr_r.corrected_job or curr_r.raw_job
         if curr_job in known_jobs:
             continue
-        if not curr_job or "-" in str(curr_job) or not is_valid_format(curr_job, curr_r.confidence):
+        if (
+            not curr_job
+            or "-" in str(curr_job)
+            or not is_valid_format(curr_job, curr_r.confidence)
+        ):
             continue
 
         curr_base = get_base(curr_job)
-        neighbors = [sorted_recs[n] for n in [i-1, i+1] if 0 <= n < len(sorted_recs)]
-        
+        neighbors = [
+            sorted_recs[n] for n in [i - 1, i + 1] if 0 <= n < len(sorted_recs)
+        ]
+
         for n_r in neighbors:
             n_job = n_r.corrected_job or n_r.raw_job
-            if n_job and is_valid_format(n_job, n_r.confidence) and "-" in n_job and get_base(n_job) == curr_base:
+            if (
+                n_job
+                and is_valid_format(n_job, n_r.confidence)
+                and "-" in n_job
+                and get_base(n_job) == curr_base
+            ):
                 curr_r.corrected_job = n_job
                 curr_r.reason = f"Tier 2: Suffix Inheritance (from {n_job})"
                 break
@@ -282,10 +348,13 @@ def _apply_suffix_inheritance(records: List[Record], known_jobs: Set[str]) -> No
 # TIER 3: WEIGHTED CONSENSUS
 # =============================================================================
 
-def _apply_weighted_consensus(records: List[Record], window: int, max_dist: int, known_jobs: Set[str]) -> None:
+
+def _apply_weighted_consensus(
+    records: List[Record], window: int, max_dist: int, known_jobs: Set[str]
+) -> None:
     """Tier 3: Weighted neighbor consensus with outlier protection."""
     sorted_recs = sorted(records, key=lambda r: scan_index(r.filename))
-    
+
     for i, curr_r in enumerate(sorted_recs):
         curr_job = curr_r.corrected_job or curr_r.raw_job
         if is_valid_format(curr_job, curr_r.confidence) or curr_job in known_jobs:
@@ -294,37 +363,42 @@ def _apply_weighted_consensus(records: List[Record], window: int, max_dist: int,
         neigh_counts = Counter()
         curr_idx = scan_index(curr_r.filename, i)
         lo, hi = max(0, i - window), min(len(sorted_recs), i + window + 1)
-        
+
         # SEQUENCE CONTINUITY PROFILING: Find the local majority base
         window_bases = [
-            get_base(sorted_recs[x].corrected_job or sorted_recs[x].raw_job) 
-            for x in range(lo, hi) 
-            if is_valid_format(sorted_recs[x].corrected_job or sorted_recs[x].raw_job,
-                              sorted_recs[x].confidence)
+            get_base(sorted_recs[x].corrected_job or sorted_recs[x].raw_job)
+            for x in range(lo, hi)
+            if is_valid_format(
+                sorted_recs[x].corrected_job or sorted_recs[x].raw_job,
+                sorted_recs[x].confidence,
+            )
         ]
-        majority_base = Counter(window_bases).most_common(1)[0][0] if window_bases else None
+        majority_base = (
+            Counter(window_bases).most_common(1)[0][0] if window_bases else None
+        )
 
         for n in range(lo, hi):
             if n == i:
                 continue
             n_r = sorted_recs[n]
             physical_dist = abs(scan_index(n_r.filename, n) - curr_idx)
-            
+
             if physical_dist > max_dist:
                 continue
 
             n_job = n_r.corrected_job or n_r.raw_job
-            
+
             if n_job and is_valid_format(n_job, n_r.confidence):
                 # CONFIDENCE GATE
-                if n_r.confidence >= 0.70 or "Tier" in n_r.reason:
+                # FIX: Replaced hardcoded 0.70 with the imported OCR_CONFIDENCE_THRESHOLD
+                if n_r.confidence >= OCR_CONFIDENCE_THRESHOLD or "Tier" in n_r.reason:
                     base_weight = (window + 1) - abs(i - n)
                     weight = base_weight if physical_dist <= 1 else base_weight * 0.3
-                    
+
                     # THE SEQUENCE OUTLIER PENALTY
                     if majority_base and get_base(n_job) != majority_base:
                         weight *= 0.1
-                        
+
                     neigh_counts[n_job] += weight
 
         if neigh_counts:
@@ -337,14 +411,17 @@ def _apply_weighted_consensus(records: List[Record], window: int, max_dist: int,
 # MAIN ENTRY POINT
 # =============================================================================
 
-def smart_correct_batch(records: List[Record], known_jobs: Optional[Iterable[str]] = None) -> List[Record]:
+
+def smart_correct_batch(
+    records: List[Record], known_jobs: Optional[Iterable[str]] = None
+) -> List[Record]:
     """Apply all smart filing correction tiers to a batch of records."""
     known_jobs_set = set(known_jobs or [])
     window = SMART_FILING_CONFIG.get("neighbor_window", 2)
     max_dist = SMART_FILING_CONFIG.get("max_physical_distance", 5)
 
     # Initialize corrected_job from raw_job
-    for r in records: 
+    for r in records:
         r.corrected_job = r.raw_job if r.raw_job not in FAILED_JOB_MARKERS else None
 
     # Apply correction tiers in order (Tier 0 added to handle Red Corrections first)
@@ -359,8 +436,9 @@ def smart_correct_batch(records: List[Record], known_jobs: Optional[Iterable[str
             r.corrected_job, r.reason = r.raw_job, "no_correction_found"
         elif not r.reason:
             r.reason = "kept: valid"
-    
+
     return records
+
 
 # =============================================================================
 # END OF FILE
