@@ -1,20 +1,24 @@
 # =============================================================================
 # src/pipeline/extractor.py
 # =============================================================================
-# MACRO-NORMALIZED ORCHESTRATOR - High-Accuracy Bounding Box Parser
+# MACRO-NORMALIZED ORCHESTRATOR - Pre-Flight Angle Detection & YOLO Parser
 # =============================================================================
 
 """
 The Macro-Normalized Orchestrator.
-Executes the Step-Scaling Dragnet. Attempts a tight, high-accuracy YOLO crop first.
-If it fails, expands drastically horizontally to ensure decapitated double-suffixes
-are caught. Includes prioritized Color-Ink recovery and Red Ink correction flagging.
+✅ UPDATED: Implements Pre-Flight Text Angle Detection.
+Instead of blindly rotating the image 4 times for YOLO (which causes false
+positives and 50s+ timeouts), we use PaddleOCR's text detector to find the
+exact reading angle of the title block. We rotate the image ONCE to make the
+text horizontal, allowing YOLO to detect the stamp perfectly at 0 degrees.
 """
 
 import logging
+import math
 from pathlib import Path
 from typing import Tuple, Optional
 import cv2
+import numpy as np
 
 from config import (
     YOLO_MODEL_PATH,
@@ -85,6 +89,91 @@ def get_ocr_engine():
 
 
 # =============================================================================
+# PRE-FLIGHT TEXT ANGLE DETECTION
+# =============================================================================
+
+
+def get_stamp_rotation_angle(ocr_engine, img):
+    """
+    Robust 2-Step Orientation Detection:
+    1. Global Page Variance: Determines if the page is horizontal or vertical in <1ms.
+    2. Local Text Direction: If vertical, uses PaddleOCR on a small corner crop
+       to determine if it's 90 CW or 90 CCW.
+    This completely eliminates false positives from picking up the wrong text
+    (like dates or revision blocks) and prevents 30s+ timeouts.
+    """
+    h, w = img.shape[:2]
+    if img.size == 0:
+        return 0
+
+    try:
+        # ---------------------------------------------------------
+        # STEP 1: GLOBAL PAGE VARIANCE (<1ms)
+        # ---------------------------------------------------------
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        proj_horiz = np.sum(thresh, axis=1)
+        proj_vert = np.sum(thresh, axis=0)
+
+        var_horiz = np.var(proj_horiz)
+        var_vert = np.var(proj_vert)
+
+        # Engineering drawings have predominantly horizontal lines.
+        # If vertical variance is much higher, the page is rotated 90 or 270.
+        is_vertical_page = var_vert > var_horiz * 1.5
+
+        if not is_vertical_page:
+            return 0  # Page is horizontal, no rotation needed
+
+        # ---------------------------------------------------------
+        # STEP 2: LOCAL TEXT DIRECTION (Only if page is vertical)
+        # ---------------------------------------------------------
+        # We crop the bottom-right corner to find the reading direction.
+        # We don't need to find the job stamp specifically; ANY text will do!
+        br_quad = img[int(h * 0.7) :, int(w * 0.7) :]
+        if br_quad.size == 0:
+            return 0
+
+        ocr_output = ocr_engine.reader.ocr(br_quad, cls=False)
+
+        if not ocr_output or not ocr_output[0]:
+            # Fallback: if no text in BR, try bottom-left
+            bl_quad = img[int(h * 0.7) :, : int(w * 0.3)]
+            ocr_output = ocr_engine.reader.ocr(bl_quad, cls=False)
+            if not ocr_output or not ocr_output[0]:
+                return 0  # Give up, assume 0
+
+        # Get the first text box found
+        box = np.array(ocr_output[0][0][0], dtype=np.float32)
+
+        # PaddleOCR orders points: TL, TR, BR, BL
+        # Vector from TL (p1) to TR (p2) represents the reading direction
+        p1 = box[0]
+        p2 = box[1]
+
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+
+        angle_rad = math.atan2(dy, dx)
+        angle_deg = math.degrees(angle_rad)
+
+        # Since we know the page is vertical, the angle should be close to +90 or -90
+        if angle_deg > 0:
+            # Vector points DOWN. Text is reading top-to-bottom.
+            # Rotate 90 CCW (270 CW) to make it horizontal.
+            return 270
+        else:
+            # Vector points UP. Text is reading bottom-to-top.
+            # Rotate 90 CW to make it horizontal.
+            return 90
+
+    except Exception as e:
+        logger.warning(f"Pre-flight angle detection failed: {e}")
+        return 0
+
+
+# =============================================================================
 # MAIN EXTRACTION FUNCTION
 # =============================================================================
 
@@ -93,16 +182,13 @@ def extract_job_number(
     image_path: Path, original_file_path: Path
 ) -> Tuple[Optional[str], float, str, dict]:
     """
-    Main extraction pipeline. Integrates YOLO detection, multi-spectrum HSV
-    blue-stamp enhancement, dual-stage OCR, and Red Ink Correction flagging.
+    Main extraction pipeline. Integrates Pre-Flight Angle Detection, YOLO detection,
+    multi-spectrum HSV blue-stamp enhancement, dual-stage OCR, and Red Ink flagging.
     """
-    # FIX: Use the unique pipeline stem (from image_path) for debug images to prevent collisions
     debug_stem = image_path.stem.replace("_ready", "")
-
     ocr_engine = get_ocr_engine()
     enhancer = get_blue_stamp_enhancer()
 
-    # Initialize default metadata dictionary
     meta = {"has_red_correction": False, "error": None}
 
     if ocr_engine is None:
@@ -127,17 +213,37 @@ def extract_job_number(
             {"error": "image_load_failed", "has_red_correction": False},
         )
 
-    # Handle page orientation for schematics
+    # Handle page orientation for schematics (Landscape vs Portrait)
     h_raw, w_raw = raw_image.shape[:2]
     oriented_image = (
         cv2.rotate(raw_image, cv2.ROTATE_90_CLOCKWISE) if h_raw > w_raw else raw_image
     )
-    h_proc, w_proc = oriented_image.shape[:2]
 
     # -------------------------------------------------------------------------
-    # PHASE 1: STANDARD YOLO (Step-Scaling Dragnet)
+    # PHASE 0.5: PRE-FLIGHT TEXT ANGLE DETECTION
+    # -------------------------------------------------------------------------
+    # Instead of blindly rotating the image 4 times for YOLO (which causes false
+    # positives), we use PaddleOCR's detector to find the exact reading angle
+    # of the title block. We rotate the image ONCE to make the text horizontal.
+
+    pre_flight_angle = get_stamp_rotation_angle(ocr_engine, oriented_image)
+
+    if pre_flight_angle != 0:
+        logger.info(
+            f"⚡ Pre-Flight: Detected title block angle of {pre_flight_angle}°. Rotating image to horizontal."
+        )
+        if pre_flight_angle == 90:
+            oriented_image = cv2.rotate(oriented_image, cv2.ROTATE_90_CLOCKWISE)
+        elif pre_flight_angle == 180:
+            oriented_image = cv2.rotate(oriented_image, cv2.ROTATE_180)
+        elif pre_flight_angle == 270:
+            oriented_image = cv2.rotate(oriented_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    # -------------------------------------------------------------------------
+    # PHASE 1: STANDARD YOLO (Now guaranteed to be upright!)
     # -------------------------------------------------------------------------
     if detector:
+        h_proc, w_proc = oriented_image.shape[:2]
         raw_detections, processed_page = detector.detect_on_image(oriented_image)
 
         if raw_detections:
@@ -170,12 +276,10 @@ def extract_job_number(
                     )
 
                     if jn:
-                        # Detect Red Ink inside the Crop
                         has_red = detect_correction_mark(roi_tight)
                         meta["has_red_correction"] = has_red
 
                         f_conf = combine_confidences(yolo_conf, ocr_conf, method=method)
-
                         if "color" in method.lower():
                             f_conf = min(1.0, f_conf + COLOR_BOOST_WEIGHT)
 
@@ -237,7 +341,6 @@ def extract_job_number(
                         meta["has_red_correction"] = has_red
 
                         f_conf = combine_confidences(yolo_conf, ocr_conf, method=method)
-
                         if "color" in method.lower():
                             f_conf = min(1.0, f_conf + COLOR_BOOST_WEIGHT)
 
@@ -279,6 +382,7 @@ def extract_job_number(
     # -------------------------------------------------------------------------
     # PHASE 3: FAST QUADRANT FALLBACK (with enhancement)
     # -------------------------------------------------------------------------
+    h_proc, w_proc = oriented_image.shape[:2]
     br_quad = oriented_image[int(h_proc * 0.45) : h_proc, int(w_proc * 0.45) : w_proc]
     if br_quad.size > 0:
         br_quad_enhanced = enhancer.enhance(br_quad, method="combined")

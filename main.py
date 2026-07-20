@@ -19,6 +19,7 @@
 
 import time
 import os
+import re
 import sys
 import logging
 import argparse
@@ -140,6 +141,15 @@ def run_conversion_stage(session: BatchSession, output_dir: Path) -> int:
 
     input_files = find_input_files(session.input_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # ✅ FIX: Clean up intermediate files from previous runs to save disk space
+    # and prevent any accidental cross-batch processing.
+    for old_file in output_dir.glob("*_ready.jpg"):
+        try:
+            old_file.unlink()
+        except Exception as e:
+            logger_conversion.warning(
+                f"Could not delete old intermediate file {old_file.name}: {e}"
+            )
 
     success_count = 0
     for file_path in tqdm(input_files, desc="Preparing Files"):
@@ -234,16 +244,33 @@ def run_extraction_batch(
     log_banner(logger_extraction, "STARTING STAGE 2: JOB NUMBER EXTRACTION")
 
     original_files = {p.stem: p for p in find_input_files(session.input_dir)}
-    ready_images = sorted(list(oriented_dir.glob("*_ready.jpg")))
+    # ✅ FIX: Sanitize batch ID exactly as fs.py does to ensure matching
+    safe_batch_id = (
+        re.sub(r'[<>:"/\\|?*]', "_", session.batch_id).strip()[:100] or "unnamed"
+    )
+    # ✅ FIX: Only glob files that explicitly start with the current batch ID
+    ready_images = sorted(
+        [
+            p
+            for p in oriented_dir.glob("*_ready.jpg")
+            if p.stem.replace("_ready", "").startswith(safe_batch_id)
+        ]
+    )
 
     if not ready_images:
-        logger.warning(f"No pre-processed images found in {oriented_dir}.")
+        logger.warning(
+            f"No pre-processed images found for batch {session.batch_id} in {oriented_dir}."
+        )
         return []
 
     tasks = []
     for img_path in ready_images:
-        # img_path.stem is e.g., 20260618_1510_scan001_ready
-        unique_stem = img_path.stem.replace("_ready", "")
+        # ✅ BONUS ROBUSTNESS FIX: Use slicing instead of .replace()
+        # If an original filename contained "_ready" (e.g. scan_ready_01.pdf),
+        # .replace() would corrupt the name. Slicing is much safer.
+        unique_stem = (
+            img_path.stem[:-6] if img_path.stem.endswith("_ready") else img_path.stem
+        )
 
         # FIX: Recover the original stem (e.g., scan001) to map to the original file
         orig_stem = extract_original_filename(unique_stem, session.batch_id)
